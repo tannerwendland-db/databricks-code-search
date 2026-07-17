@@ -1,1 +1,17 @@
 .omc/
+.env
+.databricks/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+pgdata/
+
+# uv.lock not tracked yet: local resolver pins the internal Databricks PyPI proxy,
+# which public CI cannot reach. CI resolves fresh against public PyPI. See issue #3.
+uv.lock
