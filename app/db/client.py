@@ -76,6 +76,9 @@ def create_db_engine(
     Keyword args (Lakebase mode) fall back to environment variables when omitted:
     ``endpoint`` -> ``LAKEBASE_ENDPOINT``, ``host`` -> ``LAKEBASE_HOST``,
     ``database`` -> ``LAKEBASE_DATABASE``, ``user`` -> ``LAKEBASE_USER``.
+
+    ``endpoint`` is the Lakebase endpoint identifier as expected by the Lakebase
+    Autoscaling API (a name or resource path); it is passed through to the SDK as-is.
     """
     if os.environ.get("PGHOST"):
         return create_engine(_local_url(), echo=echo, **pool_kwargs)
@@ -104,7 +107,9 @@ def _create_lakebase_engine(
     endpoint_name = endpoint or os.environ.get("LAKEBASE_ENDPOINT")
     if not endpoint_name:
         raise ValueError(
-            "Lakebase endpoint name is required: pass endpoint=... or set LAKEBASE_ENDPOINT."
+            "A Lakebase endpoint identifier is required (a name or resource path as "
+            "expected by the Lakebase Autoscaling API): pass endpoint=... or set "
+            "LAKEBASE_ENDPOINT."
         )
 
     # One WorkspaceClient, closed over by the do_connect handler below.

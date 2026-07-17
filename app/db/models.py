@@ -76,7 +76,7 @@ class Symbol(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"))
-    repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id"))
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(Text)
     kind: Mapped[str | None] = mapped_column(Text)
     start_line: Mapped[int | None] = mapped_column(Integer)
