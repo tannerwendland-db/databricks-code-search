@@ -1,0 +1,45 @@
+# Lakebase (Autoscaling) resources for the code-search database.
+#
+# Committed path: `postgres_projects` (Autoscaling), NOT legacy `database_instances`
+# (Phase-0 Task 1/2, verified on a live workspace).
+#
+# Minimal declaration by design: creating the project auto-provisions the `production`
+# branch AND a READ_WRITE endpoint `primary` (Phase-0 Task 2). We therefore do NOT
+# declare `postgres_branches`/`postgres_endpoints` explicitly — doing so collides with
+# the auto-created objects and would force `replace_existing: true` on a data-bearing
+# production branch (drop-and-recreate = index loss on redeploy). Autoscaling CU and
+# suspend are pinned via the project's `default_endpoint_settings`; downstream resources
+# (#7 job, #11 app) reference the branch/endpoint by their well-known constant names.
+resources:
+  postgres_projects:
+    pg_project:
+      project_id: ${var.lakebase_project_name}
+      display_name: ${var.lakebase_project_name}
+      pg_version: ${var.pg_version}
+      default_endpoint_settings:
+        autoscaling_limit_min_cu: 0.5
+        autoscaling_limit_max_cu: 4
+        suspend_timeout_duration: 300s
+
+  # Postgres-backed UC catalog mirroring the DB (gives it a `public` schema).
+  # `branch` uses the literal auto-provisioned branch path (no explicit branch resource).
+  postgres_catalogs:
+    pg_catalog:
+      branch: projects/${var.lakebase_project_name}/branches/production
+      catalog_id: ${var.catalog_name}
+      postgres_database: ${var.database_name}
+      create_database_if_missing: true
+
+# ---------------------------------------------------------------------------
+# Provisioned fallback (documented per issue; NOT used — Phase-0 committed to
+# Autoscaling). Would replace the resources above with:
+#   database_instances:
+#     code_search:
+#       name: ${var.lakebase_project_name}
+#       capacity: CU_1
+#   database_catalogs:
+#     code_search:
+#       name: ${var.catalog_name}
+#       database_instance_name: ${var.lakebase_project_name}
+#       database_name: ${var.database_name}
+# ---------------------------------------------------------------------------
