@@ -374,15 +374,25 @@ def test_limit_and_ordering_are_repo_id_then_path(seeded: Seeded) -> None:
 
 
 def _explain_plan(conn: Connection, node: Node) -> dict[str, Any]:
-    """Render EXPLAIN (FORMAT JSON) for ``node`` with the seq-scan escape hatch
-    disabled, scoped to a SAVEPOINT so the ``enable_seqscan`` GUC change never
-    leaks into other tests sharing this module-scoped connection (``SET LOCAL`` is
+    """Render EXPLAIN (FORMAT JSON) for ``node``'s WHERE predicate with the seq-scan
+    escape hatch disabled, scoped to a SAVEPOINT so the ``enable_seqscan`` GUC change
+    never leaks into other tests sharing this module-scoped connection (``SET LOCAL`` is
     reverted by ``ROLLBACK TO SAVEPOINT``, per Postgres semantics).
+
+    The compiled ``ORDER BY (repo_id, path)`` / ``LIMIT`` are stripped before EXPLAIN.
+    The ordering is backed by the unique btree ``uq_files_repo_id_path`` (invariant I2),
+    and on a tiny corpus the planner prefers that ordered Index Scan -- applying the
+    content regex as a mere ``Filter`` -- over a Bitmap Index Scan on the GIN index, even
+    with ``enable_seqscan = off`` (which only rules out *sequential* scans, not the
+    competing btree). That is a small-data artifact that masks whether the trgm index
+    *can* serve the predicate. Probing the WHERE clause in isolation removes the
+    competing ordering index, so the GIN trgm index is the only way to satisfy a
+    ``content ~* ...`` regex and the plan is deterministic regardless of row count.
 
     Inlines bound params via ``literal_binds`` so the plain ``EXPLAIN`` statement
     needs no separate parameter binding. Returns the root ``Plan`` node.
     """
-    stmt = compile_query(node)
+    stmt = compile_query(node).order_by(None).limit(None)
     sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
     savepoint = conn.begin_nested()
     try:
@@ -411,11 +421,12 @@ def _uses_index(plan: dict[str, Any], index_name: str) -> bool:
 def test_explain_trigram_extractable_regex_uses_gin_index(seeded: Seeded) -> None:
     """AC3, the deterministic proving assertion.
 
-    ``/Handler.*Request/`` has >=1 literal 3-gram, so with ``enable_seqscan = off``
-    forcing the planner off its seq-scan escape hatch, Postgres MUST reach for
-    ``ix_files_content_trgm`` (a Bitmap Index Scan feeding a Bitmap Heap Scan, or an
-    Index Scan) -- this holds independent of row count / table statistics, so no
-    large filler seed or ``ANALYZE`` is required for determinism.
+    ``/Handler.*Request/`` has >=1 literal 3-gram. Probing the predicate in isolation
+    (``_explain_plan`` strips the ``ORDER BY``/``LIMIT``) with ``enable_seqscan = off``
+    leaves ``ix_files_content_trgm`` as the only index that can satisfy the
+    ``content ~*`` regex, so Postgres MUST reach for it (a Bitmap Index Scan feeding a
+    Bitmap Heap Scan) -- independent of row count / table statistics, so no large filler
+    seed or ``ANALYZE`` is required for determinism.
     """
     plan = _explain_plan(seeded.conn, parse("/Handler.*Request/"))
     assert _uses_index(plan, "ix_files_content_trgm"), (
