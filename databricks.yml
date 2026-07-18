@@ -1,0 +1,72 @@
+bundle:
+  name: databricks-code-search
+
+variables:
+  repos_to_index:
+    description: "Comma/space-separated GitHub repos to index (owner/name). Empty = none."
+    default: ""
+  github_token_secret_scope:
+    description: "Databricks secret scope holding the GitHub token."
+    default: code-search
+  github_token_secret_key:
+    description: "Secret key within the scope for the GitHub token."
+    default: github_token
+  index_schedule:
+    description: "Quartz cron for the indexing job (consumed by the job resource in #7)."
+    default: "0 0 */12 * * ?"
+  lakebase_project_name:
+    description: "Lakebase Autoscaling project id (also the display name)."
+    default: code-search
+  lakebase_endpoint_name:
+    description: "Auto-provisioned READ_WRITE endpoint id under the production branch (Phase-0: `primary`)."
+    default: primary
+  catalog_name:
+    description: "New Postgres-backed UC catalog (mirrors the DB; NOT a pre-existing catalog like main). Underscore, not hyphen."
+    default: code_search
+  database_name:
+    description: "Postgres database name (Lakebase default, Phase-0 verified)."
+    default: databricks_postgres
+  pg_version:
+    description: "Postgres major version (schema-typed int)."
+    default: 17
+  app_name:
+    description: "Databricks App name (must start with mcp-). Consumed by the app resource in #11/#12."
+    default: mcp-code-search
+  job_run_as_sp:
+    description: >-
+      Prod ONLY: client id of the pre-created job run-as service principal (writer).
+      Per-workspace. Empty default keeps `validate -t dev` green (DABs requires a value
+      for every declared variable, even ones referenced only in another target). The
+      role is declared only under targets.prod, so an empty value never reaches dev.
+      Prod deploy MUST pass --var job_run_as_sp=<client-id> (an empty value would create
+      a broken NO-LOGIN role) — the prod deploy target (#12) enforces this.
+    default: ""
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    workspace:
+      # production mode expects a single, stable deploy path (silences the validate
+      # recommendation and prevents multiple copies across principals).
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    # Prod-only: the pre-created job run-as SP's Postgres writer role, declared so it
+    # exists at `bundle deploy -t prod` BEFORE `scripts/migrate.py --apply-grants` (#5)
+    # grants it and BEFORE `bundle run`. Dev uses the developer identity for writes, so
+    # this role is prod-only and dev stays input-free. `postgres_role` == SP client id
+    # (Phase-0 Task 3); `role_id` is a letter-leading slug.
+    resources:
+      postgres_roles:
+        job_writer:
+          # `.id` ref (not a literal path) so DABs orders the project before this role.
+          parent: ${resources.postgres_projects.pg_project.id}/branches/production
+          role_id: code-search-job-writer
+          postgres_role: ${var.job_run_as_sp}
+          identity_type: SERVICE_PRINCIPAL
+          auth_method: LAKEBASE_OAUTH_V1
