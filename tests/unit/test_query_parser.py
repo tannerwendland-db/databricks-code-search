@@ -137,6 +137,13 @@ def test_case_no_stamps_regex_false() -> None:
 
 
 @pytest.mark.unit
+def test_case_yes_stamps_regex_true() -> None:
+    # Guards that the resolved flag reaches Regex construction, not just Substring
+    # (case:no above also matches the default False, so it cannot catch a dropped flag).
+    assert parse("case:yes /x/") == Regex("x", True)
+
+
+@pytest.mark.unit
 def test_default_case_is_false() -> None:
     assert parse("Foo") == Substring("Foo", False)
 
@@ -174,6 +181,13 @@ def test_case_between_or_operators_collapses() -> None:
 def test_case_only_query_raises() -> None:
     with pytest.raises(QueryParseError):
         parse("case:yes")
+
+
+@pytest.mark.unit
+def test_case_only_in_parens_raises() -> None:
+    # A group that resolves to only case markers has no real terms -> empty query.
+    with pytest.raises(QueryParseError):
+        parse("(case:yes)")
 
 
 @pytest.mark.unit
@@ -238,6 +252,18 @@ def test_two_or_groups_anded() -> None:
 
 
 @pytest.mark.unit
+def test_same_operator_and_group_flattens() -> None:
+    # A parenthesized And juxtaposed with another term flattens into one n-ary And.
+    assert parse("(a b) c") == And((Substring("a"), Substring("b"), Substring("c")))
+
+
+@pytest.mark.unit
+def test_same_operator_or_group_flattens() -> None:
+    # A parenthesized Or OR'd with another term flattens into one n-ary Or.
+    assert parse("(a OR b) OR c") == Or((Substring("a"), Substring("b"), Substring("c")))
+
+
+@pytest.mark.unit
 def test_single_atom_is_bare() -> None:
     assert parse("a") == Substring("a")
 
@@ -253,6 +279,11 @@ def test_repeated_atom_no_dedup() -> None:
 @pytest.mark.unit
 def test_order_is_preserved() -> None:
     assert parse("a b") != parse("b a")
+
+
+@pytest.mark.unit
+def test_or_order_is_preserved() -> None:
+    assert parse("a OR b") != parse("b OR a")
 
 
 @pytest.mark.unit
