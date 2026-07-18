@@ -1,6 +1,12 @@
 .DEFAULT_GOAL := help
 
-.PHONY: install test test-integration lint fmt fmt-check requirements clean help migrate migrate-local migration set-secrets
+.PHONY: install test test-integration lint fmt fmt-check requirements clean help migrate migrate-local migration set-secrets deploy deploy-prod
+
+# Secret scope/key for `set-secrets`. These MUST match the bundle variables
+# `github_token_secret_scope` / `github_token_secret_key` in databricks.yml
+# (override both here and via --var together if you change them).
+SECRET_SCOPE ?= code-search
+SECRET_KEY   ?= github_token
 
 install: ## Install all dependencies (incl. dev group)
 	uv sync --all-groups
@@ -31,9 +37,16 @@ migration: ## Autogenerate a revision (local only): make migration MSG="message"
 	@test -n "$$PGHOST" || (echo "migration requires PGHOST (local); never autogenerate against live Lakebase" && exit 1)
 	uv run alembic revision --autogenerate -m "$(MSG)"
 
-set-secrets: ## Write the GitHub token into the bundle's secret scope (run after `bundle deploy`). Requires GITHUB_TOKEN in env.
+deploy: ## Deploy the bundle to the dev target
+	databricks bundle deploy -t dev
+
+deploy-prod: ## Deploy to prod (requires JOB_RUN_AS_SP=<job run-as SP client id>)
+	@test -n "$$JOB_RUN_AS_SP" || (echo "deploy-prod requires JOB_RUN_AS_SP=<client-id> (the job run-as SP); an empty value creates a broken NO-LOGIN role" && exit 1)
+	databricks bundle deploy -t prod --var job_run_as_sp=$$JOB_RUN_AS_SP
+
+set-secrets: ## Write the GitHub token into the bundle's secret scope (run after deploy). Requires GITHUB_TOKEN; scope/key via SECRET_SCOPE/SECRET_KEY.
 	@test -n "$$GITHUB_TOKEN" || (echo "set-secrets requires GITHUB_TOKEN in env" && exit 1)
-	databricks secrets put-secret code-search github_token --string-value "$$GITHUB_TOKEN"
+	databricks secrets put-secret $(SECRET_SCOPE) $(SECRET_KEY) --string-value "$$GITHUB_TOKEN"
 
 requirements: ## Export production requirements.txt for the app
 	uv export --no-dev --no-hashes -o app/requirements.txt
