@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: install test test-integration lint fmt fmt-check requirements clean help
+.PHONY: install test test-integration lint fmt fmt-check requirements clean help migrate migrate-local migration
 
 install: ## Install all dependencies (incl. dev group)
 	uv sync --all-groups
@@ -19,6 +19,17 @@ fmt: ## Auto-format code with ruff
 
 fmt-check: ## Check formatting without modifying files
 	uv run ruff format --check .
+
+migrate: ## Apply schema migrations (Lakebase or PGHOST); grants opt-in via ARGS=--apply-grants
+	uv run python scripts/migrate.py $(ARGS)
+
+migrate-local: ## Apply migrations against local Postgres (run under PGHOST; grants skipped)
+	uv run python scripts/migrate.py
+
+migration: ## Autogenerate a revision (local only): make migration MSG="message"
+	@test -n "$(MSG)" || (echo "migration requires MSG=\"...\"" && exit 1)
+	@test -n "$$PGHOST" || (echo "migration requires PGHOST (local); never autogenerate against live Lakebase" && exit 1)
+	uv run alembic revision --autogenerate -m "$(MSG)"
 
 requirements: ## Export production requirements.txt for the app
 	uv export --no-dev --no-hashes -o app/requirements.txt
