@@ -64,7 +64,8 @@ targets:
     resources:
       postgres_roles:
         job_writer:
-          parent: projects/${var.lakebase_project_name}/branches/production
+          # `.id` ref (not a literal path) so DABs orders the project before this role.
+          parent: ${resources.postgres_projects.pg_project.id}/branches/production
           role_id: code-search-job-writer
           postgres_role: ${var.job_run_as_sp}
           identity_type: SERVICE_PRINCIPAL

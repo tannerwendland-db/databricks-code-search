@@ -22,10 +22,13 @@ resources:
         suspend_timeout_duration: 300s
 
   # Postgres-backed UC catalog mirroring the DB (gives it a `public` schema).
-  # `branch` uses the literal auto-provisioned branch path (no explicit branch resource).
+  # `branch` references the project resource's `.id` (resolves to `projects/<project_id>`)
+  # so DABs creates the project BEFORE the catalog. A literal path here removes that
+  # dependency edge and races the catalog ahead of the project → 404 "Project not found"
+  # on first deploy. The `production` branch is auto-provisioned with the project.
   postgres_catalogs:
     pg_catalog:
-      branch: projects/${var.lakebase_project_name}/branches/production
+      branch: ${resources.postgres_projects.pg_project.id}/branches/production
       catalog_id: ${var.catalog_name}
       postgres_database: ${var.database_name}
       create_database_if_missing: true
