@@ -61,7 +61,8 @@ def _render(
 @pytest.mark.unit
 def test_projection_selects_symbol_and_file_columns() -> None:
     sql = _render([1, 2], ["Handler"])
-    assert "symbols.repo_id" in sql
+    # repo_id comes from the authoritative File FK (grep/compiler key off it), not Symbol.repo_id.
+    assert "files.repo_id" in sql
     assert "files.path" in sql
     assert "files.lang" in sql
     assert "symbols.name" in sql
@@ -102,7 +103,7 @@ def test_projection_orders_deterministically_with_id_tiebreak() -> None:
     sql = _render([1], ["Handler"])
     order = sql.split("ORDER BY", 1)[1]
     # symbols has no natural uniqueness, so the id tiebreak makes the LIMIT page stable.
-    assert "symbols.repo_id" in order
+    assert "files.repo_id" in order
     assert "files.path" in order
     assert "symbols.start_line" in order
     assert "symbols.name" in order

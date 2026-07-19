@@ -46,6 +46,7 @@ Semantics (load-bearing, documented, tested):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import assert_never
 
 from sqlalchemy import Connection, Select, or_, select, text
 from sqlalchemy.exc import OperationalError
@@ -113,6 +114,8 @@ def _collect_symbol_patterns(node: Node, out: list[str]) -> None:
                 _collect_symbol_patterns(child, out)
         case Substring() | Regex() | RepoFilter() | PathFilter() | LangFilter():
             return
+        case _:
+            assert_never(node)
 
 
 def _build_symbol_select(
@@ -127,9 +130,12 @@ def _build_symbol_select(
     """
     op = "~" if case_sensitive else "~*"
     name_filter = or_(*[Symbol.name.op(op, is_comparison=True)(pat) for pat in patterns])
+    # Group/order on File.repo_id (the authoritative FK grep and the compiler both key off), not
+    # the denormalized Symbol.repo_id, so the merge in the serve layer never splits one physical
+    # file across two (repo_id, path) entries if those FKs ever disagree.
     return (
         select(
-            Symbol.repo_id,
+            File.repo_id,
             File.path,
             File.lang,
             Symbol.name,
@@ -138,7 +144,7 @@ def _build_symbol_select(
         )
         .join(File, Symbol.file_id == File.id)
         .where(Symbol.file_id.in_(file_ids), name_filter)
-        .order_by(Symbol.repo_id, File.path, Symbol.start_line, Symbol.name, Symbol.id)
+        .order_by(File.repo_id, File.path, Symbol.start_line, Symbol.name, Symbol.id)
         .limit(row_limit)
     )
 

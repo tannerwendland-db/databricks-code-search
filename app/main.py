@@ -236,6 +236,8 @@ def _search_code_payload(engine: Engine, cfg: Settings, query: str, limit: int) 
 
         # Symbol leg: sym: definitions the highlight-driven grep path cannot return. A timeout
         # here flags query_too_broad but still returns whatever grep found (partial, not a lie).
+        # Note: a `sym:X foo` query runs the compiler candidate scan twice (once per leg), each
+        # under its OWN statement_timeout -- so the DB-time bound is per-leg, not a single budget.
         query_too_broad = False
         try:
             sym_result: SymbolResult | None = symbol_search(
