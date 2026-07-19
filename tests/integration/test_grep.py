@@ -199,18 +199,21 @@ def test_grep_lang_filter_restricts_candidates(seeded: Seeded) -> None:
 
 @pytest.mark.integration
 def test_tiny_statement_timeout_raises_query_too_broad(seeded: Seeded) -> None:
-    # Deterministic DB-cancellation: catastrophic backtracking on a long non-matching
-    # blob blows up >> 1 ms in Postgres ARE, cancelling the candidate query itself.
-    _insert_file(
-        seeded.conn,
-        seeded.acme_id,
-        "src/blob.txt",
-        lang=None,
-        content="a" * 4000 + "c",
-    )
+    # Deterministic DB-cancellation by WORK VOLUME, not regex pathology. Postgres's regex
+    # engine is a Spencer NFA hybrid, not a naive backtracker -- classic ReDoS patterns like
+    # ``(a+)+$`` fail fast, so they cannot be relied on to exceed a tiny timeout. Instead we
+    # force a full sequential scan whose regex recheck runs over ~16 MB of content: a 2-char
+    # pattern is too short for pg_trgm to index (no trigrams) so the GIN index cannot exclude
+    # rows, and it matches nothing so LIMIT never short-circuits. That guarantees >> 1 ms of
+    # work; Postgres's regex engine honors CHECK_FOR_INTERRUPTS, so statement_timeout cancels
+    # the candidate query itself. (Scope: this covers the DB-cancellation path only; the
+    # Python-rescan CPU gap is a documented, untested V1 limitation -- see grep.py.)
+    blob = "a" * (2 * 1024 * 1024)  # 2 MiB per file, 8 files -> ~16 MiB scanned
+    for i in range(8):
+        _insert_file(seeded.conn, seeded.acme_id, f"src/blob{i}.txt", lang=None, content=blob)
     seeded.conn.commit()
     with pytest.raises(QueryTooBroadError):
-        grep_search(seeded.conn, "/(a+)+$/", statement_timeout_ms=1)
+        grep_search(seeded.conn, "/zq/", statement_timeout_ms=1)
 
 
 @pytest.mark.integration
