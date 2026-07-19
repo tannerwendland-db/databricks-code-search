@@ -142,36 +142,6 @@ def test_validate_search_payload_rejects_match_non_list_byte_ranges() -> None:
     assert smoke.validate_search_payload(payload).ok is False
 
 
-# --- m2m_available (creds x flag matrix) ------------------------------------
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("env", "enable_mcp", "expected"),
-    [
-        ({"DATABRICKS_CLIENT_ID": "id", "DATABRICKS_CLIENT_SECRET": "sec"}, True, True),
-        ({"DATABRICKS_CLIENT_ID": "id", "DATABRICKS_CLIENT_SECRET": "sec"}, False, False),
-        ({"DATABRICKS_CLIENT_ID": "id"}, True, False),
-        ({"DATABRICKS_CLIENT_SECRET": "sec"}, True, False),
-        ({}, True, False),
-        ({}, False, False),
-        ({"DATABRICKS_CLIENT_ID": "", "DATABRICKS_CLIENT_SECRET": ""}, True, False),
-    ],
-)
-def test_m2m_available_matrix(env: dict, enable_mcp: bool, expected: bool) -> None:
-    assert smoke.m2m_available(env, enable_mcp) is expected
-
-
-# --- manual_step_message ----------------------------------------------------
-
-
-@pytest.mark.unit
-def test_manual_step_message_mentions_url_and_tool() -> None:
-    msg = smoke.manual_step_message("https://app.example.test")
-    assert "https://app.example.test/mcp" in msg
-    assert "search_code" in msg
-
-
 # --- MCP leg TLS guard (returns before any I/O) -----------------------------
 
 

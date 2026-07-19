@@ -13,22 +13,29 @@ explicit meaning (see the grant-oracle table in ``.omc/plans/issue-12-deploy-pla
   ``--expect-indexed`` (a fresh deploy has an empty corpus, so this is opt-in and must not
   false-RED).
 * MCP ``search_code`` -> end-to-end query returns file-grouped matches with line numbers; only
-  under ``--enable-mcp`` when M2M client creds are present, else a printed manual step.
+  under ``--enable-mcp`` (opt-in, since it needs a real query term against a populated corpus).
 
-The pure predicate functions (``health_ok`` .. ``manual_step_message``) do no I/O and carry no
-heavy imports, so they are unit-testable without a live app; the live legs import ``httpx`` /
-``mcp`` / ``sqlalchemy`` lazily inside their functions.
+Databricks Apps sit behind Databricks OAuth: an unauthenticated request is 302-redirected to
+the login page. Every request to the app (``/health``, ``/ready``, and the MCP leg) therefore
+carries a fresh OAuth bearer from ``WorkspaceClient().config.authenticate()`` (the uc-mcp-proxy
+pattern), which transparently works for U2M (``databricks auth login``) or M2M (a service
+principal via ``DATABRICKS_CLIENT_ID``/``DATABRICKS_CLIENT_SECRET`` with ``CAN_USE`` on the app).
+No M2M is required just to reach the endpoint — your interactive login suffices.
+
+The pure predicate functions (``health_ok`` .. ``validate_search_payload``) do no I/O and carry
+no heavy imports, so they are unit-testable without a live app; the live legs import ``httpx`` /
+``mcp`` / ``sqlalchemy`` / ``databricks.sdk`` lazily inside their functions.
 
 Exit contract: non-zero if ``/health`` or ``/ready`` fail, if connectivity fails, if
 ``--expect-indexed`` and the corpus is empty, or if ``--enable-mcp`` is set and the MCP leg
-fails. Zero (with an ``MCP leg = manual`` note) when M2M is not enabled. Never a silent green.
+fails. Zero (with an ``mcp: SKIPPED`` note) when ``--enable-mcp`` is not passed. Never a silent
+green.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
-from collections.abc import Mapping
 from typing import Any, NamedTuple
 
 
@@ -93,39 +100,40 @@ def validate_search_payload(payload: dict[str, Any]) -> Result:
     return Result(True, f"search_code: {file_count} file(s) with well-formed matches")
 
 
-def m2m_available(env: Mapping[str, str], enable_mcp: bool) -> bool:
-    """True iff ``--enable-mcp`` is set AND M2M client creds are present in the environment.
-
-    M2M requires an OAuth service-principal client id + secret (the standard Databricks SDK
-    ``DATABRICKS_CLIENT_ID`` / ``DATABRICKS_CLIENT_SECRET`` pair).
-    """
-    if not enable_mcp:
-        return False
-    return bool(env.get("DATABRICKS_CLIENT_ID")) and bool(env.get("DATABRICKS_CLIENT_SECRET"))
-
-
-def manual_step_message(app_url: str) -> str:
-    """The printed manual instruction when the MCP leg cannot run automatically."""
-    return (
-        "MCP leg = manual: M2M creds not available (need --enable-mcp + DATABRICKS_CLIENT_ID / "
-        "DATABRICKS_CLIENT_SECRET, and an account-admin OAuth app connection for the app). "
-        f"Verify by hand: connect an MCP client to {app_url}/mcp and call "
-        'search_code(query="<a term you indexed>"); expect file-grouped matches with line '
-        "numbers."
-    )
-
-
 # ------------------------------------------------------------------------------ live legs
 #
-# Heavy imports (httpx / mcp / sqlalchemy) are lazy so the pure predicates above stay
-# import-light and unit-testable without a live deployment.
+# Heavy imports (httpx / mcp / sqlalchemy / databricks.sdk) are lazy so the pure predicates
+# above stay import-light and unit-testable without a live deployment.
 
 
-def _http_get_json(url: str) -> tuple[int, dict[str, Any]]:
-    """GET ``url`` and return ``(status_code, json_body)``; a non-JSON body yields ``{}``."""
+def _auth_headers() -> dict[str, str]:
+    """Databricks OAuth headers for the CURRENT identity (uc-mcp-proxy pattern).
+
+    ``WorkspaceClient().config.authenticate()`` returns ``{"Authorization": "Bearer <token>"}``
+    for whatever the SDK resolves — U2M (``databricks auth login``) or M2M (an SP via
+    ``DATABRICKS_CLIENT_ID``/``DATABRICKS_CLIENT_SECRET``). The app front door 302-redirects any
+    request without this. We also forward ``X-Forwarded-Access-Token`` so the app could use the
+    caller's identity (our shared-SP app ignores it; harmless to send). A fresh call per smoke
+    run keeps the ~1h token current.
+    """
+    from databricks.sdk import WorkspaceClient
+
+    headers = dict(WorkspaceClient().config.authenticate())
+    token = headers.get("Authorization", "")
+    if token.startswith("Bearer "):
+        headers["X-Forwarded-Access-Token"] = token[len("Bearer ") :]
+    return headers
+
+
+def _http_get_json(url: str, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+    """GET ``url`` with OAuth headers; return ``(status_code, json_body)`` (non-JSON -> ``{}``).
+
+    ``follow_redirects`` stays OFF so an auth failure surfaces as a clear ``302`` rather than a
+    silent 200 of the login page's HTML.
+    """
     import httpx
 
-    resp = httpx.get(url, timeout=15.0)
+    resp = httpx.get(url, headers=headers, timeout=15.0)
     try:
         body = resp.json()
     except Exception:
@@ -133,18 +141,22 @@ def _http_get_json(url: str) -> tuple[int, dict[str, Any]]:
     return resp.status_code, body
 
 
-def _check_health(app_url: str) -> Result:
-    status, body = _http_get_json(f"{app_url}/health")
+def _check_health(app_url: str, headers: dict[str, str]) -> Result:
+    status, body = _http_get_json(f"{app_url}/health", headers)
     if status == 200 and health_ok(body):
         return Result(True, "GET /health = 200 status:ok")
-    return Result(False, f"GET /health = {status} body={body!r}")
+    hint = " (302 = OAuth redirect: not authenticated)" if status == 302 else ""
+    return Result(False, f"GET /health = {status}{hint} body={body!r}")
 
 
-def _check_ready(app_url: str) -> Result:
-    status, _ = _http_get_json(f"{app_url}/ready")
+def _check_ready(app_url: str, headers: dict[str, str]) -> Result:
+    status, _ = _http_get_json(f"{app_url}/ready", headers)
     if ready_ok(status):
         return Result(True, "GET /ready = 200 (app SP SELECT grant landed)")
-    return Result(False, f"GET /ready = {status} (grant oracle: app SP cannot SELECT, or DB down)")
+    hint = " (302 = OAuth redirect: not authenticated)" if status == 302 else ""
+    return Result(
+        False, f"GET /ready = {status}{hint} (grant oracle: app SP cannot SELECT, or DB down)"
+    )
 
 
 def _check_db(expect_indexed: bool) -> list[Result]:
@@ -173,27 +185,27 @@ def _check_db(expect_indexed: bool) -> list[Result]:
     return results
 
 
-def _check_mcp(app_url: str, query: str) -> Result:
-    """Live MCP leg: authenticate M2M, call ``search_code``, validate the envelope."""
+def _check_mcp(app_url: str, query: str, headers: dict[str, str] | None = None) -> Result:
+    """Live MCP leg: call ``search_code`` over authenticated streamable HTTP, validate envelope."""
     import asyncio
     import json
 
     # This leg sends a real Databricks OAuth bearer to app_url; refuse a non-TLS URL so the
-    # token can never be emitted in cleartext (or to an attacker-supplied http:// host).
+    # token can never be emitted in cleartext (or to an attacker-supplied http:// host). Checked
+    # before any auth/network so a bad URL fails fast.
     if not app_url.startswith("https://"):
         return Result(
             False,
             f"MCP leg refused: --app-url must be https:// to carry the OAuth bearer "
             f"(got {app_url!r})",
         )
+    auth_headers = headers if headers is not None else _auth_headers()
 
     async def _run() -> Result:
-        from databricks.sdk import WorkspaceClient
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
 
-        headers = WorkspaceClient().config.authenticate()  # {"Authorization": "Bearer ..."}
-        async with streamablehttp_client(f"{app_url}/mcp", headers=headers) as (r, w, _):
+        async with streamablehttp_client(f"{app_url}/mcp", headers=auth_headers) as (r, w, _):
             async with ClientSession(r, w) as session:
                 await session.initialize()
                 res = await session.call_tool("search_code", {"query": query})
@@ -212,8 +224,6 @@ def _print_leg(name: str, status: str, detail: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import os
-
     parser = argparse.ArgumentParser(description="Post-deploy smoke test for the MCP app.")
     parser.add_argument("--app-url", required=True, help="Base URL of the deployed app.")
     parser.add_argument(
@@ -224,7 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--enable-mcp",
         action="store_true",
-        help="Attempt the live MCP search_code leg (requires M2M client creds).",
+        help="Also exercise the live MCP search_code leg (uses your Databricks login; needs a "
+        "populated corpus so the query returns matches).",
     )
     parser.add_argument(
         "--query",
@@ -240,12 +251,21 @@ def main(argv: list[str] | None = None) -> int:
         """Turn a live leg's exception into a gating FAIL line, not a raw traceback."""
         try:
             return fn()
-        except Exception as exc:  # unreachable app / engine build failure / etc.
+        except Exception as exc:  # unreachable app / engine build failure / no Databricks auth
             return Result(False, f"{name}: raised {type(exc).__name__}: {exc}")
 
+    # Databricks OAuth headers for the app front door, minted once. If no usable identity is
+    # configured, _auth_headers raises → /health and /ready then FAIL (not a silent 302).
+    try:
+        headers = _auth_headers()
+    except Exception as exc:
+        headers = {}
+        _print_leg("auth", "FAIL", f"could not mint a Databricks OAuth token: {exc}")
+        failed = True
+
     # /health and /ready — always gating.
-    health = _guard("health", lambda: _check_health(app_url))
-    ready = _guard("ready", lambda: _check_ready(app_url))
+    health = _guard("health", lambda: _check_health(app_url, headers))
+    ready = _guard("ready", lambda: _check_ready(app_url, headers))
     for name, result in (("health", health), ("ready", ready)):
         _print_leg(name, "PASS" if result.ok else "FAIL", result.detail)
         failed = failed or not result.ok
@@ -260,17 +280,16 @@ def main(argv: list[str] | None = None) -> int:
         _print_leg("direct-sql", "PASS" if result.ok else "FAIL", result.detail)
         failed = failed or not result.ok
 
-    # MCP: automated only when M2M is available; otherwise a documented, non-gating manual step
-    # UNLESS --enable-mcp was requested (then a failure is gating).
-    if m2m_available(os.environ, args.enable_mcp):
-        result = _check_mcp(app_url, args.query)
+    # MCP: opt-in via --enable-mcp (needs a real query term against a populated corpus).
+    # Authenticated with the same Databricks identity — no M2M required.
+    if args.enable_mcp:
+        result = _guard("mcp", lambda: _check_mcp(app_url, args.query, headers))
         _print_leg("mcp", "PASS" if result.ok else "FAIL", result.detail)
         failed = failed or not result.ok
-    elif args.enable_mcp:
-        _print_leg("mcp", "FAIL", "--enable-mcp set but M2M creds are missing")
-        failed = True
     else:
-        _print_leg("mcp", "SKIPPED", manual_step_message(app_url))
+        _print_leg(
+            "mcp", "SKIPPED", "pass --enable-mcp to exercise search_code with your Databricks login"
+        )
 
     print("smoke: FAIL" if failed else "smoke: PASS")
     return 1 if failed else 0
