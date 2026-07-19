@@ -9,6 +9,7 @@ description = "Agent-facing code search service on Databricks (MCP server + inde
 requires-python = ">=3.12"
 dependencies = [
     "mcp>=1.20",
+    "anyio",
     "uvicorn[standard]",
     "psycopg[binary]>=3.1",
     "sqlalchemy>=2.0",
@@ -31,6 +32,7 @@ dev = [
     "ruff",
     "mypy",
     "httpx",
+    "asgi-lifespan",
 ]
 
 [tool.setuptools.packages.find]
@@ -47,8 +49,11 @@ select = ["E", "F", "I"]
 markers = [
     "unit: Pure unit tests with no external dependencies",
     "integration: Tests that exercise multiple modules together (still mocked at boundaries)",
+    "e2e: In-process streamable-HTTP tests driving the real ASGI app (CI Postgres via PGHOST)",
+    "observability: Logging choke-point / fault-not-swallowed / saturation-signal tests",
 ]
 addopts = "-v --tb=short --strict-markers"
+asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 
