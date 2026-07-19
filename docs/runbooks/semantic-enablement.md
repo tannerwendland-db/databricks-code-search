@@ -73,6 +73,16 @@ or the deploying identity on prod).
 **(c) Re-apply grants.** See section 3 -- this is the step that's easy to get
 wrong.
 
+**(d) Only now, turn the flag on.** Set `CODE_SEARCH_SEMANTIC_ENABLED=1` for the
+app **after** (b) and (c) succeed. Order matters: the flag and the schema are
+independent, so enabling first is a reachable state, and `semantic_search` cannot
+infer the schema from the extensions (the `pg_am` capability probe tells it whether
+the beta extensions are loaded, not whether `chunks` exists). Enabling early is
+handled gracefully rather than catastrophically -- the tool returns a structured
+`semantic_schema_missing` payload rather than raising -- but it returns no results
+until the migration has run, and if you skip (c) the failure appears later, at index
+or query time, as a permission error.
+
 ## 3. Grants reconciliation (the subtle part)
 
 `chunks` did not exist when grants were last applied (during `make deploy` /
