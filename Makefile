@@ -78,8 +78,8 @@ set-secrets: ## Write the GitHub token into the bundle's secret scope (run after
 	@test -n "$$GITHUB_TOKEN" || (echo "set-secrets requires GITHUB_TOKEN in env" && exit 1)
 	databricks secrets put-secret "$(SECRET_SCOPE)" "$(SECRET_KEY)" --string-value "$$GITHUB_TOKEN"
 
-requirements: ## Export production requirements.txt for the app
-	uv export --no-dev --no-hashes -o app/requirements.txt
+requirements: ## Export production requirements.txt for the app (no `-e .`: the app runs from shipped source, not an installed package)
+	uv export --no-dev --no-hashes --no-emit-project -o app/requirements.txt
 
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .ruff_cache .mypy_cache dist build *.egg-info

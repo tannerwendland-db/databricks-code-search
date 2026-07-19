@@ -41,10 +41,8 @@ resources:
             # CAN_CONNECT_AND_CREATE is Postgres login-level only (and the sole enum the App
             # binding accepts); the app SP's SELECT reader grant on repos/files comes from #5.
             permission: CAN_CONNECT_AND_CREATE
-      config:
-        command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${DATABRICKS_APP_PORT:-8000}"]
-        env:
-          - name: LAKEBASE_ENDPOINT
-            value: projects/${var.lakebase_project_name}/branches/production/endpoints/${var.lakebase_endpoint_name}
-          - name: DATABRICKS_HOST
-            value: ${workspace.host}
+      # No inline `config` here (command/env live only in app/app.yaml, matching the working
+      # uc-catalog-mcp pattern). Declaring config in BOTH places risks a merge conflict, and
+      # `${workspace.host}`-style bundle interpolation can resolve empty in app config env
+      # ("Must specify environment variable source"). The app needs only LAKEBASE_ENDPOINT
+      # (set in app.yaml); DATABRICKS_HOST + the app SP OAuth creds are auto-injected at runtime.
