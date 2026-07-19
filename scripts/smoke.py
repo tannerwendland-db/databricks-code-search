@@ -236,13 +236,27 @@ def main(argv: list[str] | None = None) -> int:
     app_url = args.app_url.rstrip("/")
     failed = False
 
+    def _guard(name: str, fn: Any) -> Result:
+        """Turn a live leg's exception into a gating FAIL line, not a raw traceback."""
+        try:
+            return fn()
+        except Exception as exc:  # unreachable app / engine build failure / etc.
+            return Result(False, f"{name}: raised {type(exc).__name__}: {exc}")
+
     # /health and /ready — always gating.
-    for name, result in (("health", _check_health(app_url)), ("ready", _check_ready(app_url))):
+    health = _guard("health", lambda: _check_health(app_url))
+    ready = _guard("ready", lambda: _check_ready(app_url))
+    for name, result in (("health", health), ("ready", ready)):
         _print_leg(name, "PASS" if result.ok else "FAIL", result.detail)
         failed = failed or not result.ok
 
-    # Direct-SQL: connectivity always; corpus only under --expect-indexed. Both gating.
-    for result in _check_db(args.expect_indexed):
+    # Direct-SQL: connectivity always; corpus only under --expect-indexed. Both gating. A raised
+    # engine/connection error becomes a single gating FAIL line rather than crashing the run.
+    try:
+        db_results = _check_db(args.expect_indexed)
+    except Exception as exc:
+        db_results = [Result(False, f"raised {type(exc).__name__}: {exc}")]
+    for result in db_results:
         _print_leg("direct-sql", "PASS" if result.ok else "FAIL", result.detail)
         failed = failed or not result.ok
 

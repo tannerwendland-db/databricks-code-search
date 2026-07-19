@@ -26,6 +26,31 @@ req() {
 	printf '%s' "$1"
 }
 
+# retry <attempts> <sleep_s> <cmd...>: run cmd, retrying up to <attempts> times with
+# <sleep_s> between tries. Returns the last attempt's status. Used to absorb transient lag
+# (e.g. the app SP role becoming visible in pg_roles shortly after the app reaches ACTIVE).
+retry() {
+	local attempts="$1" sleep_s="$2" i
+	shift 2
+	for i in $(seq 1 "$attempts"); do
+		if "$@"; then
+			return 0
+		fi
+		if [ "$i" -lt "$attempts" ]; then
+			echo "deploy: attempt $i/$attempts failed; retrying in ${sleep_s}s" >&2
+			sleep "$sleep_s"
+		fi
+	done
+	return 1
+}
+
+# grant_attempt <app_role> <job_role> <target>: one idempotent grants pass. An empty job role
+# is falsy in migrate.py (`if job_env:` skips it), so dev grants the app only. Args are passed
+# explicitly (not via dynamic scope) so retry can re-invoke it cleanly.
+grant_attempt() {
+	APP_SP_ROLE="$1" JOB_WRITER_ROLE="$2" make migrate TARGET="$3" ARGS=--apply-grants
+}
+
 SUB="${1:-}"
 TARGET="${2:-dev}"
 
@@ -128,25 +153,24 @@ cmd_full() {
 	echo "deploy: [6/8] grants (post-activation)"
 	app_sp_role=$(req "$(databricks apps get "$app_name" -o json |
 		jq -er '.service_principal_client_id')" "app SP client id")
+	# dev grants the app only (job_writer_role="" is falsy → migrate.py's `if job_env:` skips
+	# it, so a stray JOB_WRITER_ROLE in the developer's shell can't leak a job grant, Addendum 3).
+	local job_writer_role=""
 	if [ "$TARGET" = prod ]; then
 		# prod's JOB_WRITER_ROLE comes from the guarded env, NOT bundle-JSON (which resolves
 		# job_run_as_sp to its "" default without --var). D1: assert BOTH before granting so a
 		# missing writer role can't silently leave the indexer SP write-less (Pre-mortem #5).
-		local job_writer_role="$JOB_RUN_AS_SP"
+		job_writer_role="$JOB_RUN_AS_SP"
 		{ [ -n "$app_sp_role" ] && [ -n "$job_writer_role" ]; } ||
 			die "prod grants require BOTH APP_SP_ROLE and JOB_WRITER_ROLE"
-		# NOTE (Addendum 2): `make migrate TARGET=prod` re-runs `bundle validate -t prod` WITHOUT
-		# --var job_run_as_sp; harmless — it derives only endpoint/db (independent of
-		# job_run_as_sp) and the "" default validates green (databricks.yml:43).
-		APP_SP_ROLE="$app_sp_role" JOB_WRITER_ROLE="$job_writer_role" \
-			make migrate TARGET="$TARGET" ARGS=--apply-grants
-	else
-		# dev: app grant ONLY. Pass JOB_WRITER_ROLE="" explicitly (Addendum 3) — empty is falsy,
-		# so migrate.py's `if job_env:` skips it, and a stray JOB_WRITER_ROLE in the developer's
-		# shell can't leak a job grant into the app-only dev path.
-		APP_SP_ROLE="$app_sp_role" JOB_WRITER_ROLE="" \
-			make migrate TARGET="$TARGET" ARGS=--apply-grants
 	fi
+	# NOTE (Addendum 2): `make migrate TARGET=prod` re-runs `bundle validate -t prod` WITHOUT
+	# --var job_run_as_sp; harmless — it derives only endpoint/db (independent of job_run_as_sp)
+	# and the "" default validates green (databricks.yml:43).
+	# Retry to absorb the lag between the app reaching ACTIVE and its SP role becoming visible in
+	# pg_roles (Pre-mortem #2); grants + `upgrade head` are idempotent, so re-tries are safe.
+	retry 5 10 grant_attempt "$app_sp_role" "$job_writer_role" "$TARGET" ||
+		die "grants failed after retries (is the app SP role visible in pg_roles yet?)"
 
 	# 7. First index (optional) — only when repos_to_index is non-empty.
 	echo "deploy: [7/8] first index (optional)"
