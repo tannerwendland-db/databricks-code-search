@@ -93,6 +93,20 @@ def test_utf8_byte_range_differs_from_char_index() -> None:
     assert m.line_text.encode("utf-8")[s:e] == b"foo"
 
 
+@pytest.mark.unit
+def test_utf8_multiple_spans_with_multibyte_gap_between_them() -> None:
+    # Two "foo" matches separated by a multibyte run: the incremental gap-encoding must
+    # keep every span's byte offsets exact, not just the first.
+    line = "foo 你好 foo"
+    matches = _matches("foo", line)
+    (m,) = matches
+    assert len(m.byte_ranges) == 2
+    for start, end in m.byte_ranges:
+        assert line.encode("utf-8")[start:end] == b"foo"
+    # Second span starts past the 6-byte "你好" run, not at its char index.
+    assert m.byte_ranges == ((0, 3), (11, 14))
+
+
 # --------------------------------------------------------------------------- empty sets
 
 

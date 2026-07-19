@@ -31,7 +31,17 @@ Caveats (load-bearing, documented, never silently wrong):
   ``^``/``$`` are line anchors, ``.`` never crosses lines, and cross-line constructs (e.g.
   ``(?s)...``) do not span lines. A Postgres-valid regex that Python ``re`` rejects is
   skipped (that atom contributes no highlights) and ``regex_incompatible`` is set. The SQL
-  predicate already selected the file; grep only degrades the *highlighting*.
+  predicate already selected the file; grep only degrades the *highlighting*. Case folding
+  can also diverge: ``re.IGNORECASE`` (Python Unicode folding) and Postgres ``lower()`` do
+  not agree on every non-ASCII pair (e.g. ``ß``/``SS``, Turkish dotless ``i``), so a file
+  the SQL predicate matched case-insensitively may yield zero Python highlights and drop
+  out. ASCII is unaffected.
+* **Highlight-driven results.** A file appears only if at least one line produces a
+  non-empty highlight span, so two query shapes the SQL predicate *does* match return no
+  files: a filter-only query with no content atom (e.g. ``lang:go`` alone -- ``grep_search``
+  extracts line matches and has nothing to highlight; file listing is a separate concern)
+  and a query whose only atom matches zero-width (e.g. ``/^/``, ``/\b/`` -- dropped as
+  non-highlights, not flagged ``regex_incompatible`` since the pattern compiled fine).
 * **Uncapped Python CPU (V1 limitation).** The byte cap bounds memory and aggregate bytes
   scanned but NOT CPU/wall-clock: a catastrophic-backtracking ``re`` pattern on a single
   *under-cap* file runs unbounded, holds the GIL, and can starve the app.
@@ -175,11 +185,24 @@ def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
 
 
 def _char_to_byte_ranges(line: str, spans: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
-    """Convert line-local char spans to UTF-8 byte spans via a per-line prefix table."""
-    prefix = [0]
-    for ch in line:
-        prefix.append(prefix[-1] + len(ch.encode("utf-8")))
-    return tuple((prefix[start], prefix[end]) for start, end in spans)
+    """Convert sorted, non-overlapping line-local char spans to UTF-8 byte spans.
+
+    Walks the (already sorted) spans once, encoding only the gap before each span and
+    the span itself -- never a per-char prefix table over the whole line. This keeps
+    memory O(one transient slice) rather than O(len(line)) resident int objects, which
+    matters for a single very long line (e.g. minified JS) whose length the indexer's
+    per-file byte cap does not bound.
+    """
+    ranges: list[tuple[int, int]] = []
+    char_cursor = 0
+    byte_cursor = 0
+    for start, end in spans:
+        byte_cursor += len(line[char_cursor:start].encode("utf-8"))
+        start_byte = byte_cursor
+        byte_cursor += len(line[start:end].encode("utf-8"))
+        char_cursor = end
+        ranges.append((start_byte, byte_cursor))
+    return tuple(ranges)
 
 
 def extract_line_matches(content: str, patterns: Sequence[re.Pattern[str]]) -> list[LineMatch]:
@@ -216,7 +239,8 @@ def _reraise_or_query_too_broad(error: OperationalError) -> NoReturn:
     """Map a Postgres statement_timeout cancellation to :class:`QueryTooBroadError`."""
     if isinstance(error.orig, psycopg.errors.QueryCanceled):
         raise QueryTooBroadError(
-            "the per-request statement_timeout cancelled the query (too broad)"
+            "the per-request statement_timeout cancelled a query (candidate or content "
+            "fetch) -- the query is too broad for the time budget"
         ) from error
     raise error
 
