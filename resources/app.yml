@@ -1,0 +1,38 @@
+# Databricks App (#11): the FastMCP streamable-HTTP code-search server.
+#
+# Minimal declaration by design. The app runs as its auto-provisioned service principal; it
+# binds ${DATABRICKS_APP_PORT:-8000} (shell form so the injected port is honored) and reads
+# the Lakebase corpus. No GitHub-token secret is bound — the app never fetches from GitHub
+# (that is the #7 indexing job's concern).
+#
+# CROSS-ISSUE: `permission: CAN_CONNECT` is a Postgres login only. The app SP still needs a
+# reader grant (SELECT on repos/files, schema USAGE) from #5; `/ready`'s
+# `SELECT 1 FROM repos LIMIT 1` surfaces a missing grant post-deploy as a 503.
+#
+# The Autoscaling `database` binding shape, `compute_size` key, and whether inline `config`
+# is accepted are CLI-version-sensitive — verify against a live `databricks bundle validate
+# -t dev`; if inline `config` is rejected, the committed app/app.yaml is the fallback.
+resources:
+  apps:
+    code_search:
+      name: ${var.app_name}
+      # Paths are resolved relative to THIS file (resources/), like job.yml's ../dist glob,
+      # so reach up to the bundle-root app/ (verified via live `databricks bundle validate`).
+      source_code_path: ../app
+      compute_size: MEDIUM
+      resources:
+        - name: lakebase
+          database:
+            database_name: ${var.database_name}
+            instance_name: ${var.lakebase_project_name}
+            # CAN_CONNECT_AND_CREATE is the only enum the App database resource accepts
+            # (live `bundle validate` rejects CAN_CONNECT); still Postgres login-level only —
+            # the app SP's SELECT reader grant on repos/files comes from #5.
+            permission: CAN_CONNECT_AND_CREATE
+      config:
+        command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${DATABRICKS_APP_PORT:-8000}"]
+        env:
+          - name: LAKEBASE_ENDPOINT
+            value: projects/${var.lakebase_project_name}/branches/production/endpoints/${var.lakebase_endpoint_name}
+          - name: DATABRICKS_HOST
+            value: ${workspace.host}

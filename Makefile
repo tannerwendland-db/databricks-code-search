@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: install test test-integration lint fmt fmt-check requirements clean help migrate migrate-local migration set-secrets deploy deploy-prod
+.PHONY: install run test test-integration lint fmt fmt-check requirements clean help migrate migrate-local migration set-secrets deploy deploy-prod
 
 # Secret scope/key for `set-secrets`. These MUST match the bundle variables
 # `github_token_secret_scope` / `github_token_secret_key` in databricks.yml
@@ -15,11 +15,14 @@ TARGET ?= dev
 install: ## Install all dependencies (incl. dev group)
 	uv sync --all-groups
 
-test: ## Run unit tests
-	uv run pytest -m unit
+run: ## Run the MCP server locally (dual-mode: set PGHOST + PG* for local Postgres; binds DATABRICKS_APP_PORT or 8000)
+	uv run sh -c 'uvicorn app.main:app --host 0.0.0.0 --port $${DATABRICKS_APP_PORT:-8000}'
 
-test-integration: ## Run integration tests
-	uv run pytest -m integration
+test: ## Run unit tests (no external deps: unit + pure observability/logging tests)
+	uv run pytest -m "unit or observability"
+
+test-integration: ## Run integration tests (need Postgres: integration + streamable-HTTP e2e)
+	uv run pytest -m "integration or e2e"
 
 lint: ## Run ruff check + format check + mypy
 	uv run ruff check . && uv run ruff format --check . && uv run mypy app indexer

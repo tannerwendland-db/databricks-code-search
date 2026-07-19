@@ -1,0 +1,12 @@
+# Databricks App runtime config (committed fallback if inline bundle `config` is rejected
+# on the deploying CLI version — see resources/app.yml).
+#
+# Databricks Apps inject the bind port via DATABRICKS_APP_PORT (default 8000; never 8080).
+# The shell form is REQUIRED so the injected value is honored — an exec-array `--port 8000`
+# would ignore it.
+command: ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${DATABRICKS_APP_PORT:-8000}"]
+env:
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/code-search/branches/production/endpoints/primary"
+  - name: DATABRICKS_HOST
+    value: "${DATABRICKS_HOST}"
