@@ -1,0 +1,81 @@
+// Minimal client-side router (no dependency: WS-C says "keep deps lean" and this app only
+// has three pages). The backend mounts SPAStaticFiles(html=True) at "/" so any deep link
+// (e.g. /file?repo=x&path=y) falls back to index.html and hydrates here from location.
+
+import { useEffect, useSyncExternalStore } from "react";
+
+export type Route =
+  | { page: "search"; query: string }
+  | { page: "file"; repo: string; path: string; line: number | null }
+  | { page: "repos" };
+
+function parseLocation(): Route {
+  const { pathname, search, hash } = window.location;
+  const params = new URLSearchParams(search);
+  if (pathname === "/file") {
+    const line = hash.match(/^#L(\d+)$/);
+    return {
+      page: "file",
+      repo: params.get("repo") ?? "",
+      path: params.get("path") ?? "",
+      line: line ? Number(line[1]) : null,
+    };
+  }
+  if (pathname === "/repos") {
+    return { page: "repos" };
+  }
+  return { page: "search", query: params.get("q") ?? "" };
+}
+
+let current = parseLocation();
+const listeners = new Set<() => void>();
+
+window.addEventListener("popstate", () => {
+  current = parseLocation();
+  listeners.forEach((l) => l());
+});
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot(): Route {
+  return current;
+}
+
+/** Navigate client-side (pushState) and notify subscribers. */
+export function navigate(url: string): void {
+  window.history.pushState(null, "", url);
+  current = parseLocation();
+  listeners.forEach((l) => l());
+}
+
+/** Replace the current entry (e.g. reflecting a submitted query into the URL). */
+export function replaceRoute(url: string): void {
+  window.history.replaceState(null, "", url);
+  current = parseLocation();
+  listeners.forEach((l) => l());
+}
+
+export function useRoute(): Route {
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+/** Intercept same-origin left-clicks on <a href> so navigation stays client-side. */
+export function useLinkInterception(): void {
+  useEffect(() => {
+    function onClick(event: MouseEvent) {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const anchor = (event.target as HTMLElement).closest("a");
+      if (!anchor || anchor.target || anchor.hasAttribute("download")) return;
+      const href = anchor.getAttribute("href");
+      if (!href || !href.startsWith("/") || href.startsWith("//")) return;
+      event.preventDefault();
+      navigate(href);
+    }
+    document.addEventListener("click", onClick);
+    return () => document.removeEventListener("click", onClick);
+  }, []);
+}

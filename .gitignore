@@ -15,6 +15,7 @@ dist/
 !webui/frontend/dist/
 build/
 pgdata/
+node_modules/
 
 # webui/wheels/app.whl is a deploy-time build artifact (`make webui-wheel`, mirroring the
 # top-level wheel target) that the webui app imports `app.*` from. Nothing above currently
