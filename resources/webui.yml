@@ -4,7 +4,7 @@
 # auto-provisioned service principal; it binds ${DATABRICKS_APP_PORT:-8000} (shell form so
 # the injected port is honored) and reads the same Lakebase corpus as the MCP app, read-only.
 #
-# CROSS-ISSUE: `permission: CAN_CONNECT` is a Postgres login only. The webui app SP still
+# CROSS-ISSUE: `permission: CAN_CONNECT_AND_CREATE` is a Postgres login only. The webui app SP still
 # needs a reader grant (SELECT on repos/files, schema USAGE) — see scripts/deploy.sh's
 # post-activation grants step; `/ready`'s `SELECT 1 FROM repos LIMIT 1` surfaces a missing
 # grant post-deploy as a 503.
