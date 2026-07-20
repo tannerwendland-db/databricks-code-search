@@ -125,8 +125,13 @@ Postgres role and is what the indexing job runs as.
 **OAuth-only — there is no PAT path**. An account admin must register a Databricks OAuth
 app connection (Account Console → Settings → App Connections) with the client's redirect
 URLs, e.g. `http://localhost:<port>/oauth/callback` for Claude Code or Claude Desktop.
-Until this exists, no external MCP client can reach `/mcp` — requests get an OAuth redirect
-instead of a response.
+Until this exists, no external MCP client can reach `/mcp` over native OAuth — requests get
+an OAuth redirect instead of a response.
+
+This prerequisite is **avoidable**: the recommended client setup uses `uc-mcp-proxy`, which
+borrows your Databricks CLI credentials instead of running the MCP OAuth flow, so it needs
+no app connection and no redirect URLs. Only take on prerequisite 2 if you specifically want
+native per-client OAuth. See [Connecting a client](#connecting-a-client).
 
 `make smoke ARGS=--enable-mcp` is not blocked by this: it authenticates with your own
 Databricks login (`WorkspaceClient().config.authenticate()`), so it needs `CAN_USE` on the
@@ -255,15 +260,125 @@ only, so it will pass even when the app SP is missing its SELECT grant.
 
 ## Connecting a client
 
-Point any MCP client at `https://<app-url>/mcp` over streamable HTTP and authenticate
-through the OAuth app connection from prerequisite 2. `make deploy` prints the app URL;
-`databricks apps get <app-name>` returns it later.
+The server speaks streamable HTTP at `https://<app-url>/mcp`. Every caller needs `CAN_USE`
+on the app, whichever path below you take.
 
-The caller also needs `CAN_USE` on the app. Machine-to-machine callers authenticate with
-`DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET`; interactive ones go through the
-redirect URL registered on the connection. A 302 where you expected JSON means the request
-was unauthenticated — that is the single most common symptom of a missing or misconfigured
-app connection.
+Get the URL — `make deploy` prints it at step 8, and afterwards:
+
+```bash
+databricks apps get <app-name> -o json | jq -r '.url'
+```
+
+There are two ways to authenticate. They differ in who has to do setup work, not in what the
+agent sees:
+
+| | [`uc-mcp-proxy`](#option-a-uc-mcp-proxy-recommended) | [Native OAuth](#option-b-native-oauth-app-connection) |
+|---|---|---|
+| Transport to the client | stdio (proxied) | streamable HTTP |
+| Account-admin setup | none | app connection + redirect URLs |
+| Credentials | your Databricks CLI profile | per-client OAuth client ID |
+| Works in every MCP client | yes | only clients Databricks documents |
+
+### Option A: `uc-mcp-proxy` (recommended)
+
+[`uc-mcp-proxy`](https://github.com/IceRhymers/uc-mcp-proxy) is a stdio-to-streamable-HTTP
+shim that attaches a Databricks OAuth bearer from your **existing CLI profile** — the same
+trick `make smoke` uses. Because it never runs the MCP OAuth flow, it needs no app
+connection and no redirect URLs, which skips prerequisite 2 entirely.
+
+Authenticate the CLI once:
+
+```bash
+databricks auth login --host https://<workspace-host>
+```
+
+Then add the server. Claude Code:
+
+```bash
+claude mcp add code-search -- uvx uc-mcp-proxy --url https://<app-url>/mcp
+```
+
+Any client that reads an `mcpServers` block — Claude Desktop, Cursor, Windsurf, VS Code —
+takes the same command as JSON:
+
+```json
+{
+  "mcpServers": {
+    "code-search": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["uc-mcp-proxy", "--url", "https://<app-url>/mcp"]
+    }
+  }
+}
+```
+
+`uvx` fetches the proxy on demand, so there is nothing to install; `uv tool install
+uc-mcp-proxy` pins it locally if you would rather not pay the fetch on every launch.
+
+Useful flags:
+
+- `--profile <name>` — pick a non-default CLI profile. Worth setting explicitly if you have
+  several workspaces configured, since the default profile is easy to lose track of.
+- `--auth-type databricks-cli` — force CLI-profile auth when ambient
+  `DATABRICKS_*` environment variables would otherwise be picked up first.
+- `--no-auto-login` — for CI and headless runs. On an OAuth U2M profile with an expired
+  token the proxy otherwise shells out to `databricks auth login` and opens a browser,
+  which hangs a non-interactive job. Supply `DATABRICKS_TOKEN` (or M2M client
+  credentials) instead.
+
+Note that auto-login fires **only** for OAuth (`databricks-cli`) profiles. On PAT, M2M, or
+Azure profiles the proxy reports the failure rather than re-running login, so it cannot
+overwrite credentials you did not ask it to touch.
+
+### Option B: native OAuth app connection
+
+Use this if you want the client to hold its own OAuth registration rather than ride on your
+CLI profile. It requires prerequisite 2 to be done first: an account admin registers an app
+connection (Account Console → **Settings → App Connections**) carrying the client's redirect
+URL and either `all-apis` or a narrower scope set. The CLI equivalent:
+
+```bash
+databricks account custom-app-integration create --json '{
+  "name": "code-search-mcp",
+  "redirect_urls": ["http://localhost:8080/oauth/callback"],
+  "confidential": false,
+  "scopes": ["all-apis"]
+}'
+```
+
+That returns the client ID the client below needs. Claude Code:
+
+```bash
+claude mcp add-json code-search \
+  '{"type":"http","url":"https://<app-url>/mcp","oauth":{"clientId":"<client-id>","callbackPort":8080}}'
+```
+
+The `callbackPort` must match the port in the registered redirect URL, or the browser
+round-trip dead-ends after consent.
+
+Machine-to-machine callers skip the redirect entirely and authenticate with
+`DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` on a service principal holding
+`CAN_USE`.
+
+Two limits are worth knowing before you commit to this path. Databricks does not support
+**dynamic client registration**, so clients that only speak DCR cannot use OAuth against
+this endpoint at all — those need Option A. And **PAT auth does not work here**: Databricks
+supports bearer-token auth for managed MCP servers, but Apps-hosted servers like this one are
+OAuth-only, so an `Authorization: Bearer <pat>` header gets you the login redirect, not JSON.
+
+### Troubleshooting
+
+**A 302 where you expected JSON** means the request was unauthenticated. Under Option A,
+your CLI token is missing or expired — re-run `databricks auth login`. Under Option B, it is
+the classic symptom of a missing or misconfigured app connection.
+
+**403 after a successful login** is authorization, not authentication: the identity reached
+the app but lacks `CAN_USE`. Grant it in the app's permissions.
+
+**Tools list, but every search returns nothing.** The corpus is empty rather than the
+connection broken — check with `make smoke TARGET=dev ARGS=--expect-indexed`, and see
+[Configuring what gets indexed](#configuring-what-gets-indexed).
 
 ## Local development
 
