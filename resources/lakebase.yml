@@ -21,17 +21,18 @@ resources:
         autoscaling_limit_max_cu: 4
         suspend_timeout_duration: 300s
 
-  # Postgres-backed UC catalog mirroring the DB (gives it a `public` schema).
-  # `branch` references the project resource's `.id` (resolves to `projects/<project_id>`)
-  # so DABs creates the project BEFORE the catalog. A literal path here removes that
-  # dependency edge and races the catalog ahead of the project → 404 "Project not found"
-  # on first deploy. The `production` branch is auto-provisioned with the project.
-  postgres_catalogs:
-    pg_catalog:
-      branch: ${resources.postgres_projects.pg_project.id}/branches/production
-      catalog_id: ${var.catalog_name}
-      postgres_database: ${var.database_name}
-      create_database_if_missing: true
+# ---------------------------------------------------------------------------
+# Postgres-backed UC catalog (postgres_catalogs/pg_catalog, mirroring the DB
+# with a `public` schema) is NOT declared here: it requires CREATE CATALOG on
+# the metastore, which deployers may not have, and nothing downstream
+# currently reads it. Re-add if/when a catalog is actually needed:
+#   postgres_catalogs:
+#     pg_catalog:
+#       branch: ${resources.postgres_projects.pg_project.id}/branches/production
+#       catalog_id: ${var.catalog_name}
+#       postgres_database: ${var.database_name}
+#       create_database_if_missing: true
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # Provisioned fallback (documented per issue; NOT used — Phase-0 committed to

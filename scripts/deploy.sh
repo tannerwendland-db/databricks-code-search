@@ -64,7 +64,7 @@ TARGET="${2:-dev}"
 VAR_ARGS=()
 [ "$TARGET" = prod ] && VAR_ARGS=(--var "job_run_as_sp=${JOB_RUN_AS_SP:-}")
 
-JSON="$(databricks bundle validate -t "$TARGET" "${VAR_ARGS[@]}" -o json 2>/dev/null)" ||
+JSON="$(databricks bundle validate -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"} -o json 2>/dev/null)" ||
 	die "bundle validate -t $TARGET failed (run it directly to see why)"
 [ -n "$JSON" ] || die "empty bundle JSON for target $TARGET"
 
@@ -114,7 +114,7 @@ cmd_full() {
 	# 2. Deploy — ships definitions (Lakebase project/endpoint/catalog, prod job_writer role,
 	#    secret scope, job, app definition). Does NOT start app compute.
 	echo "deploy: [2/8] bundle deploy -t $TARGET"
-	databricks bundle deploy -t "$TARGET" "${VAR_ARGS[@]}"
+	databricks bundle deploy -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
 
 	# 3. GitHub token secret check (indexing is optional for a running app).
 	echo "deploy: [3/8] GitHub token secret check (scope=$scope key=$key)"
@@ -136,13 +136,13 @@ cmd_full() {
 
 	# 5. Run app — ships app source AND starts compute; the app SP + its pg role materialize here.
 	echo "deploy: [5/8] bundle run code_search (ship source + start compute)"
-	databricks bundle run code_search -t "$TARGET" "${VAR_ARGS[@]}"
+	databricks bundle run code_search -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
 	state=$(wait_active "$app_name")
 	if [ "$state" != ACTIVE ]; then
 		# First-activation fallback (Pre-mortem #1): push source directly, re-run, re-probe.
 		echo "deploy: app did not activate via bundle run; falling back to apps deploy" >&2
 		databricks apps deploy "$app_name" --source-code-path "$file_path/app"
-		databricks bundle run code_search -t "$TARGET" "${VAR_ARGS[@]}"
+		databricks bundle run code_search -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
 		state=$(wait_active "$app_name")
 		[ "$state" = ACTIVE ] ||
 			die "app '$app_name' never reached ACTIVE (last state: ${state:-unknown})"
@@ -177,7 +177,7 @@ cmd_full() {
 	#    Non-fatal: a missing GitHub token (step 3 only warns) must not abort a deploy whose
 	#    app is already ACTIVE and granted.
 	echo "deploy: [7/8] first index"
-	if databricks bundle run code_search_index -t "$TARGET" "${VAR_ARGS[@]}"; then
+	if databricks bundle run code_search_index -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}; then
 		echo "deploy: first index complete"
 	else
 		echo "deploy: WARNING first index failed — check config.yaml and the GitHub token," \
@@ -208,7 +208,7 @@ cmd_destroy() {
 	read -r ans
 	[ "$ans" = "$project" ] || die "confirmation mismatch; aborting"
 	# --auto-approve: bundle destroy prompts again otherwise, after our own typed gate.
-	databricks bundle destroy -t "$TARGET" "${VAR_ARGS[@]}" --auto-approve
+	databricks bundle destroy -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"} --auto-approve
 }
 
 case "$SUB" in

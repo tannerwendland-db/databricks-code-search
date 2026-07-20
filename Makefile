@@ -12,6 +12,11 @@ SECRET_KEY   ?= github_token
 # from. Override: `make migrate TARGET=prod`.
 TARGET ?= dev
 
+# Databricks CLI/SDK auth profile (~/.databrickscfg). Defaults to DEFAULT, same as an
+# unset DATABRICKS_CONFIG_PROFILE resolves today. Override: `make deploy PROFILE=myprofile`.
+PROFILE ?= DEFAULT
+export DATABRICKS_CONFIG_PROFILE := $(PROFILE)
+
 install: ## Install all dependencies (incl. dev group)
 	uv sync --all-groups
 
