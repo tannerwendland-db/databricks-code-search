@@ -472,6 +472,16 @@ def grep_search(
                 # Char count is a valid lower bound on UTF-8 byte count, so this never
                 # under-counts the cap; checked BEFORE .encode()/processing so the cap is a
                 # real bound (overshoot <= one file) and avoids a transient copy of a huge file.
+                #
+                # If THIS check trips on the very first row of a page, `last_candidate` is still
+                # None (never advanced -- see below), so `next_cursor` comes out None too even
+                # though `byte_capped` is True: a resumed page would re-fetch the same oversized
+                # row and trip the exact same cap again, stalling pagination on that one file
+                # forever. Unreachable in practice: the indexer's per-file ingestion cap
+                # (``MAX_FILE_BYTES`` = 1_000_000, ``indexer/languages.py``) is strictly smaller
+                # than every ``max_content_bytes`` default (``DEFAULT_MAX_CONTENT_BYTES`` here,
+                # ``Settings.max_content_bytes`` in ``app/config.py`` -- both 8 MiB), so no
+                # ingested file can ever alone exceed the cap on the first row of a page.
                 if running + len(content) > max_content_bytes:
                     byte_capped = True
                     break

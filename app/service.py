@@ -412,9 +412,24 @@ def search_code_payload(
     )
     next_cursor_out: str | None | _Unset = _UNSET
     if pagination_mode:
-        next_cursor_out = (
-            encode_cursor(result.next_cursor) if result.next_cursor is not None else None
-        )
+        if run_symbol_leg and result.no_content_atom:
+            # Filter-only query on page 1 (e.g. a `sym:` atom with no content atom alongside
+            # it): grep's `files` is ALWAYS empty here regardless of how many CANDIDATE files
+            # the filter matched (there is no content pattern to highlight), but grep's own
+            # candidate scan can still hit `row_limit` and row-cap when the filter matches many
+            # files -- e.g. a `sym:` name shared by >= row_limit files. Left alone, that still
+            # sets a non-null `next_cursor` (grep.py:482); the symbol leg only ever folds in on
+            # page 1 too (page-1-only, see above), so every continuation page would re-run the
+            # same filter-only grep scan, find nothing to highlight, and hand back ANOTHER
+            # non-null cursor -- an unbounded sequence of empty pages. Suppressed here instead:
+            # a filter-only query is always exactly one page, with any real "there's more"
+            # signal (e.g. more matching symbols than fit) already carried by
+            # `truncated`/`truncation_reason`, not `next_cursor`.
+            next_cursor_out = None
+        else:
+            next_cursor_out = (
+                encode_cursor(result.next_cursor) if result.next_cursor is not None else None
+            )
     return _search_envelope(
         query,
         files=files,

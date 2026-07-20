@@ -256,6 +256,48 @@ def test_sym_only_query_returns_single_page(seeded: Seeded) -> None:
     assert payload["file_count"] == 1
 
 
+@pytest.mark.integration
+def test_sym_only_query_with_candidates_over_row_limit_still_returns_single_page(
+    seeded: Seeded,
+) -> None:
+    # Regression (review finding): a sym: name shared by MORE files than `row_limit` row-caps
+    # grep's own CANDIDATE scan (it evaluates the sym: EXISTS predicate to find candidates, same
+    # as the compiler) even though grep's `files` is always empty for a filter-only query -- so
+    # without the fix, next_cursor came out non-null and every continuation page (which skips
+    # the page-1-only symbol leg too) would fetch another empty page forever. `row_limit=2`
+    # against 3 Thing-symbol files reproduces the row-capped candidate scan.
+    with seeded.engine.connect() as conn:
+        for i in range(3):
+            file_id = conn.execute(
+                insert(File)
+                .values(
+                    repo_id=seeded.acme_id,
+                    path=f"src/thing{i}.go",
+                    lang="go",
+                    content="package main\n",
+                )
+                .returning(File.id)
+            ).scalar_one()
+            conn.execute(
+                insert(Symbol).values(
+                    file_id=file_id,
+                    repo_id=seeded.acme_id,
+                    name="Thing",
+                    kind="function",
+                    start_line=1,
+                )
+            )
+        conn.commit()
+
+    payload = service.search_code_payload(seeded.engine, seeded.cfg, "sym:Thing", 2, cursor=None)
+    assert payload["next_cursor"] is None
+    # The "there's more" signal is still surfaced -- just not via next_cursor. The symbol
+    # leg's OWN candidate scan is row_limit-capped identically, so with 3 matches and
+    # row_limit=2 it can't return all of them either.
+    assert payload["truncated"] is True
+    assert payload["truncation_reason"] == "row_cap"
+
+
 # --------------------------------------------------------------------------- cursor errors
 
 
