@@ -1,0 +1,37 @@
+# Databricks App (#35): the web UI, a second Databricks App alongside the MCP server.
+#
+# Minimal declaration by design, mirroring resources/app.yml. The app runs as its own
+# auto-provisioned service principal; it binds ${DATABRICKS_APP_PORT:-8000} (shell form so
+# the injected port is honored) and reads the same Lakebase corpus as the MCP app, read-only.
+#
+# CROSS-ISSUE: `permission: CAN_CONNECT` is a Postgres login only. The webui app SP still
+# needs a reader grant (SELECT on repos/files, schema USAGE) — see scripts/deploy.sh's
+# post-activation grants step; `/ready`'s `SELECT 1 FROM repos LIMIT 1` surfaces a missing
+# grant post-deploy as a 503.
+#
+# The app binds Lakebase via a `postgres` resource (Autoscaling projects), NOT a `database`
+# resource — same reasoning as resources/app.yml: a `database` binding resolves
+# `instance_name` against the provisioned Database Instance namespace, which an Autoscaling
+# `postgres_projects` project is NOT part of.
+resources:
+  apps:
+    webui:
+      name: ${var.webui_app_name}
+      # Paths are resolved relative to THIS file (resources/), like app.yml's ../app, so
+      # reach up to the bundle-root webui/ (verified via live `databricks bundle validate`).
+      source_code_path: ../webui
+      compute_size: MEDIUM
+      resources:
+        - name: lakebase
+          postgres:
+            # Same project/branch/database as the MCP app — one shared, read-only corpus.
+            # Building these from the project's `.id` reference (not a literal `projects/<name>`
+            # path) creates the DABs dependency edge so the project is created BEFORE the app.
+            branch: ${resources.postgres_projects.pg_project.id}/branches/production
+            database: ${resources.postgres_projects.pg_project.id}/branches/production/databases/databricks-postgres
+            # CAN_CONNECT_AND_CREATE is Postgres login-level only (and the sole enum the App
+            # binding accepts); the webui SP's SELECT reader grant comes from deploy.sh's
+            # post-activation grants step, same as the MCP app.
+            permission: CAN_CONNECT_AND_CREATE
+      # No inline `config` here — command/env live only in webui/app.yaml, matching app.yml's
+      # rationale (avoids a merge conflict and bundle-interpolation-resolves-empty risk).
