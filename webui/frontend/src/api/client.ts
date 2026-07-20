@@ -6,24 +6,24 @@ import type { SearchEnvelope } from "../utils/searchReducer";
 
 export class ApiError extends Error {
   status: number;
-  position: number | null;
 
-  constructor(message: string, status: number, position: number | null = null) {
+  constructor(message: string, status: number) {
     super(message);
     this.name = "ApiError";
     this.status = status;
-    this.position = position;
   }
 }
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path);
   if (!res.ok) {
-    // GET /api/search returns 400 {error, position?} on QueryParseError (WS-B contract).
+    // Every webui/main.py error route returns 400/404 JSON shaped {error: string} (parse
+    // errors, bad cursors, invalid parameters, missing files) -- no `position` field: the
+    // backend can't recover a QueryParseError's position once app.service has folded it into
+    // the payload's query_parse_error string (see webui/main.py:api_search's docstring).
     const body = await res.json().catch(() => null);
     const message = (body && typeof body.error === "string" ? body.error : null) ?? res.statusText;
-    const position = body && typeof body.position === "number" ? body.position : null;
-    throw new ApiError(message, res.status, position);
+    throw new ApiError(message, res.status);
   }
   return (await res.json()) as T;
 }
