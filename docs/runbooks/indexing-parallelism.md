@@ -36,15 +36,30 @@ carefully, because the name understates it: **a conflicted repo was rolled back
 and is NOT indexed.**
 
 The `repos` row changed while that worker held its transaction, so the whole
-transaction (files, symbols, chunks, the sweep) was discarded. Under the current
-single-run model no second worker for one repo can exist, so the realistic
-trigger is someone running the §5 force-reindex (`UPDATE repos SET
-index_semantics_version = NULL`) while a run is in flight.
+transaction (files, symbols, chunks, the sweep) was discarded.
 
-It is excluded from the exit code because it **self-heals**, not because the work
-was redundant: the NULL stamp makes the next scheduled run re-index that repo
-unconditionally. If you see conflicts and cannot wait for the next run, re-run
-the job — completed repos are skipped, so the retry is cheap.
+**If you are seeing this in production, something is wrong that this runbook did
+not anticipate — do not treat it as routine.** No known writer can reach it.
+`index_repo`'s first statement is an `ON CONFLICT DO UPDATE` that takes the
+`repos` row lock and holds it until commit, so a competing writer either blocks
+until the worker finishes (its write lands *after* the guard) or commits first
+(and the worker's baseline is then *its* value). Both directions were measured
+against real Postgres: a concurrent `UPDATE ... SET index_semantics_version =
+NULL` blocked for the worker's entire transaction and the guard still matched.
+**In particular, running the §5 force-reindex while a run is in flight does NOT
+cause this** — an earlier version of this runbook said it did, and that was
+wrong.
+
+What it is actually for: it fires loudly if `for_each_task` sharding lands, or if
+someone raises `max_concurrent_runs` in `resources/job.yml`. Either removes the
+single-writer property above, and this is the guard that says so instead of
+silently restoring stale content.
+
+It is excluded from the exit code because it **self-heals** — the next run sees a
+stamp it does not match and re-indexes that repo. If you cannot wait for the next
+scheduled run, re-run the job; completed repos are skipped, so the retry is
+cheap. Then work out which writer got there, because per the above there should
+not be one.
 
 ---
 

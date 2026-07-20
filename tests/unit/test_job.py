@@ -830,11 +830,19 @@ def test_conflicts_only_run_exits_zero_without_a_traceback(
     INDEXED, because the whole transaction rolled back.
 
     It is excluded from the exit code because it SELF-HEALS -- whatever displaced
-    the stamp (realistically an operator running the force-reindex mid-run) makes
-    the next run re-index this repo unconditionally. That is the rationale, NOT
-    that the work was redundant and NOT that the index is already correct: for
-    one run, that repo is stale. So: its own bucket, WARNING with no traceback,
-    excluded from the exit code, and a message that says so plainly.
+    the stamp makes the next run re-index this repo unconditionally. That is the
+    rationale, NOT that the work was redundant and NOT that the index is already
+    correct: for one run, that repo is stale.
+
+    No claim is made here about WHAT displaces the stamp. Two earlier revisions
+    of this docstring each named a cause and each was wrong -- first "another
+    writer committed equally valid data", then "an operator running the
+    force-reindex mid-run". Both are refuted by the row lock index_repo's
+    statement 1 takes and holds to commit (measured against real Postgres: a
+    concurrent force-reindex blocks, and the guard matches). This test pins the
+    HANDLING -- own bucket, WARNING, no traceback, exit 0, honest message -- and
+    deliberately asserts nothing about reachability, which belongs with the
+    invariant in indexer/store.py.
     """
 
     def _conflict(conn: Any, *, name: str, items: Any, **_: Any) -> IndexCounts:

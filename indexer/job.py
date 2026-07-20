@@ -243,19 +243,22 @@ def run(
     # disk size, so this line is how the peak-usage arithmetic in
     # docs/runbooks/indexing-parallelism.md gets a real number to check against
     # -- and how a shrunken disk becomes visible before it becomes an outage.
-    tmp_root = tempfile.gettempdir()
-    usage = shutil.disk_usage(tmp_root)
-    logger.info(
-        "local disk at %s: %.1f GB free of %.1f GB total; %d worker(s) x %.1f GB peak",
-        tmp_root,
-        usage.free / 1e9,
-        usage.total / 1e9,
-        workers,
-        REQUIRED_FREE_BYTES / 1e9,
-    )
-
     ok = skipped = conflicts = failures = 0
     try:
+        # Inside the try for the same reason as the stamp read below: shutil
+        # .disk_usage raises if tmp is missing or unmounted, and above the try
+        # that would skip the finally and leak the http client and the engine.
+        tmp_root = tempfile.gettempdir()
+        usage = shutil.disk_usage(tmp_root)
+        logger.info(
+            "local disk at %s: %.1f GB free of %.1f GB total; %d worker(s) x %.1f GB peak",
+            tmp_root,
+            usage.free / 1e9,
+            usage.total / 1e9,
+            workers,
+            REQUIRED_FREE_BYTES / 1e9,
+        )
+
         # One batched read for the whole run, BEFORE fan-out. Inside the try so a
         # failure here still closes the http client and disposes the engine.
         stamps = _read_stamps(engine, entries)
@@ -288,15 +291,27 @@ def run(
                     # The repos row changed under this worker, so its whole
                     # transaction rolled back and THIS REPO IS NOT INDEXED.
                     #
-                    # Under the current single-run model (resources/job.yml sets
-                    # queue.enabled with no max_concurrent_runs, and resolve_repos
-                    # dedups) no second worker for one repo can exist -- so the
-                    # realistic trigger is an operator running the documented
-                    # force-reindex (UPDATE repos SET index_semantics_version =
-                    # NULL) while a run is in flight. That is benign because it
-                    # SELF-HEALS: the NULL stamp makes the next run re-index this
-                    # repo unconditionally. That self-healing, not "the work was
-                    # redundant", is why this is excluded from the exit code.
+                    # NO KNOWN WRITER CAN REACH THIS TODAY -- do not go hunting
+                    # for one. index_repo's statement 1 is an ON CONFLICT DO
+                    # UPDATE that takes the repos row lock and holds it to
+                    # commit, so any competing writer either blocks until this
+                    # worker finishes (its write lands after the CAS) or commits
+                    # first (and statement 1's RETURNING then reads ITS value as
+                    # the baseline). Measured both ways against real Postgres:
+                    # a concurrent `UPDATE ... SET index_semantics_version=NULL`
+                    # blocked for the worker's whole transaction and the CAS
+                    # matched. An earlier revision of this comment named that
+                    # force-reindex as the "realistic trigger" -- that was wrong.
+                    #
+                    # It is excluded from the exit code because it is an
+                    # invariant assertion, not an expected failure path (see
+                    # StaleIndexError in indexer/store.py). It earns its keep by
+                    # failing loudly if for_each_task sharding lands or someone
+                    # raises max_concurrent_runs in resources/job.yml -- either
+                    # of which removes the single-writer property above.
+                    #
+                    # Should it ever fire, the repo self-heals: the next run
+                    # sees a stamp it does not match and re-indexes it.
                     #
                     # Logged WITHOUT a traceback: a rolled-back transaction is
                     # not a crash, and the stack adds nothing an operator needs.
@@ -561,7 +576,19 @@ def _positive_int(raw: str) -> int:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s [%(repo)s]: %(message)s")
+    # force=True is load-bearing, not boilerplate: basicConfig is a documented
+    # no-op when the root logger ALREADY has handlers, and a serverless runtime
+    # may well have configured logging before this entry point runs. Without it
+    # the RepoLogFilter below still attaches -- but the pre-existing formatter
+    # never references %(repo)s, so every line ships un-attributed under fan-out
+    # and nothing errors. The test suite cannot catch this (it empties
+    # root.handlers so basicConfig takes effect at all), so the guard has to be
+    # here rather than in a test.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s [%(repo)s]: %(message)s",
+        force=True,
+    )
     # On the HANDLER, not a logger: a logger-attached filter would not apply to
     # records propagated from indexer.fetch/store/embed, which is precisely the
     # interleaving the repo field exists to disambiguate.

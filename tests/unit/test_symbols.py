@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from indexer import symbols
 from indexer.languages import ExtractedSymbol, ParsedFile
 from indexer.symbols import _parser_for, extract_symbols
 
@@ -79,22 +80,33 @@ def test_parser_cache_is_per_thread() -> None:
     Uses explicit threads, not a pool: a pool may serve both calls from one
     worker thread, in which case the thread-local correctly returns the same
     parser and the assertion would fail for the wrong reason.
+
+    The threads run SEQUENTIALLY (start/join, start/join) and deliberately do
+    NOT rendezvous on a barrier. A barrier here would make the test a race: it
+    releases both threads into ``_parser_for`` at once, so a regression to a
+    shared module-level dict could have both observe an empty cache and build
+    distinct parsers -- passing while the regression is present. Measured at
+    30/30 catches in practice, but "usually" is not what a regression guard is
+    for. Sequential execution makes the discrimination total: under a shared
+    dict thread 2 gets thread 1's cached parser (``p1 is p2`` -> fail); under
+    threading.local it builds its own (-> pass).
     """
     got: dict[int, Any] = {}
-    barrier = threading.Barrier(2)
 
     def grab(idx: int) -> None:
-        barrier.wait()
         got[idx] = _parser_for("python")
 
-    threads = [threading.Thread(target=grab, args=(i,)) for i in range(2)]
-    for t in threads:
+    for i in range(2):
+        t = threading.Thread(target=grab, args=(i,))
         t.start()
-    for t in threads:
         t.join()
 
     p1, p2 = got[0], got[1]
     assert p1 is not p2
+    # Pins the mechanism, not just its observable effect: if _PARSER_CACHE were
+    # reverted to a dict the identity check above would already fail, but this
+    # names the reason in the failure output.
+    assert isinstance(symbols._PARSER_CACHE, threading.local)
 
     same: list[Any] = []
 
