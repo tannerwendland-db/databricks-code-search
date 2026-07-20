@@ -10,17 +10,7 @@ caller of the MCP endpoint is allowed to read.
 
 ## Architecture
 
-```
-GitHub ──tarball@SHA──> indexing job ──atomic upsert──> Lakebase Postgres
-                        (serverless,                    (repos / files /
-                         scheduled)                      symbols / chunks)
-                                                              │
-                                                         SELECT (app SP)
-                                                              │
-                                                              v
-                          MCP client <──streamable HTTP── MCP server
-                          (OAuth)          /mcp           (Databricks App)
-```
+<img src="docs/diagrams/architecture.png" alt="GitHub to indexing job to Lakebase Postgres to MCP server to MCP client" width="450">
 
 The job resolves each repo's default-branch HEAD to an immutable SHA, downloads the
 tarball for that SHA (no git binary — the job runs on serverless), parses every source
@@ -170,6 +160,8 @@ JOB_RUN_AS_SP=<client-id> make deploy-prod
 
 `make deploy` runs `scripts/deploy.sh full`:
 
+<img src="docs/diagrams/deploy-pipeline.png" alt="The eight steps of deploy.sh full, with the migrate and grant steps split around app activation" width="720">
+
 1. **Validate** the bundle; for prod, assert `JOB_RUN_AS_SP` is non-empty.
 2. **Deploy** resources — Lakebase project, UC catalog, secret scope, job, app. Compute is
    not started yet.
@@ -250,4 +242,6 @@ Run the server locally with `make run` (binds `DATABRICKS_APP_PORT`, else 8000).
   on semantic search
 - [`docs/runbooks/ci-lakebase.md`](docs/runbooks/ci-lakebase.md) — running CI against a
   real Lakebase engine
+- `docs/diagrams/*.dot` — Graphviz sources for the images above. The PNGs are committed;
+  edit the `.dot` and run `make diagrams` rather than touching them.
 - `make help` — every target with its flags
