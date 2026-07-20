@@ -12,7 +12,7 @@ chain skills:
 
 ```
 ralplan ──► GitHub issue (already exists) ──► sized execution (ralph/autopilot/team)
-  ──► pre-PR gate + code-review loop ──► SPEC-drift check ──► PR (Closes #NNN)
+  ──► pre-PR gate + code-review loop ──► epic-drift check ──► PR (Closes #NNN)
   ──► post-PR review loop (real PR comments, real amending commits)
 ```
 
@@ -68,8 +68,13 @@ Load-bearing facts this skill depends on (verify if the repo has moved on):
   - `make test-integration` — integration + e2e tests; **needs Postgres**
     (CI spins up `pgvector/pgvector:pg16`). Run locally against the same image,
     or state explicitly that it was deferred to CI and why.
-- **Source-of-truth doc:** `SPEC.md` at repo root (there is no `docs/` dir and
-  no `check-doc-drift.sh`). The SPEC-drift check is a manual read, not a script.
+- **Source of truth:** the **epic issue on GitHub** — currently
+  [#1 `[Epic] databricks-code-search V1`](https://github.com/IceRhymers/databricks-code-search/issues/1).
+  There is no `SPEC.md`; it was never committed. Read the epic with
+  `gh issue view 1`. Confirm the current epic rather than assuming #1 — a later
+  epic supersedes it once V1 closes (`gh issue list --label epic --state open`).
+  Operator-facing detail lives in `docs/runbooks/` and `README.md`. The drift
+  check is a manual read, not a script.
 - **Commit style:** `<area>: <summary>` (e.g. `deploy: ...`, `migrate: ...`,
   `smoke: ...`) or `fix(<area>): ...`; review fixes as
   `Address review pass N: <summary>`. PR titles end with `(#N)`.
@@ -147,9 +152,12 @@ Load-bearing facts this skill depends on (verify if the repo has moved on):
        (`pgvector/pgvector:pg16`, same as CI). If Postgres genuinely isn't
        available locally, say so explicitly and note the suite will be validated
        by CI's `integration` job — do not silently skip it.
-   - **SPEC-drift:** read `SPEC.md`; if the change alters behavior the SPEC
-     documents, update `SPEC.md` in the same branch before opening the PR, never
-     after.
+   - **Epic-drift:** read the epic issue (`gh issue view 1`, or whatever the
+     current open `epic`-labeled issue is). If the change alters behavior the epic
+     describes, update the epic body (`gh issue edit <epic> --body ...`) so it
+     stays the source of truth. If the change alters operator-facing behavior,
+     update `README.md` / `docs/runbooks/` in the same branch before opening the
+     PR, never after.
    - **Code-review loop (max 2 cycles):** a fresh `code-reviewer` agent (add
      `security-reviewer` in parallel if the issue is `risk`-labeled or touches
      auth / OAuth / secret-scope / grants / SQL compilation) reviews the diff
@@ -172,7 +180,7 @@ Load-bearing facts this skill depends on (verify if the repo has moved on):
    ## Test plan
    <real make lint / make test / make test-integration output>
 
-   SPEC-drift check: <updated SPEC.md | no SPEC-visible change>"
+   Epic-drift check: <updated epic #N / README / runbooks | no externally-visible change>"
    ```
    Match the repo's PR body shape (see PR #27): What & why, Design, Testing with
    real suite counts, Acceptance mapping. `Closes #NNN` in the body.
@@ -257,7 +265,8 @@ or state explicitly it's deferred to CI.
 - [ ] `make lint` green (fresh output)
 - [ ] `make test` green (fresh output)
 - [ ] `make test-integration` green locally, or explicitly deferred to CI with reason
-- [ ] SPEC.md checked (updated, or confirmed no SPEC-visible change)
+- [ ] Epic issue checked (updated, or confirmed no epic-visible change); README /
+      runbooks updated if operator-facing behavior changed
 - [ ] Pre-PR review loop clean (or reported unclean after 2 cycles)
 - [ ] User checkpoint passed before push (unless `--yes`)
 - [ ] PR opened with `Closes #NNN` and title ending `(#N)`

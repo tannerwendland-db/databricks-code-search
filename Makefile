@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: install run test test-integration lint fmt fmt-check requirements clean help migrate migrate-semantic migrate-local migration set-secrets deploy deploy-prod smoke index destroy
+.PHONY: install run test test-integration lint fmt fmt-check requirements clean help migrate migrate-semantic migrate-local migration set-secrets deploy deploy-prod smoke index destroy diagrams
 
 # Secret scope/key for `set-secrets`. These MUST match the bundle variables
 # `github_token_secret_scope` / `github_token_secret_key` in databricks.yml
@@ -94,6 +94,13 @@ set-secrets: ## Write the GitHub token into the bundle's secret scope (run after
 
 requirements: ## Export production requirements.txt for the app (no `-e .`: the app runs from shipped source, not an installed package)
 	uv export --no-dev --no-hashes --no-emit-project -o app/requirements.txt
+
+diagrams: ## Re-render docs/diagrams/*.dot to PNG (needs graphviz; PNGs are committed)
+	@command -v dot >/dev/null || (echo "graphviz not installed: 'dot' not on PATH" && exit 1)
+	@for f in docs/diagrams/*.dot; do \
+		echo "-> $${f%.dot}.png"; \
+		dot -Tpng -Gdpi=144 "$$f" -o "$${f%.dot}.png"; \
+	done
 
 clean: ## Remove caches and build artifacts
 	rm -rf .pytest_cache .ruff_cache .mypy_cache dist build *.egg-info
