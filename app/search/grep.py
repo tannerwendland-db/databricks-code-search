@@ -37,11 +37,24 @@ Caveats (load-bearing, documented, never silently wrong):
   the SQL predicate matched case-insensitively may yield zero Python highlights and drop
   out. ASCII is unaffected.
 * **Highlight-driven results.** A file appears only if at least one line produces a
-  non-empty highlight span, so two query shapes the SQL predicate *does* match return no
-  files: a filter-only query with no content atom (e.g. ``lang:go`` alone -- ``grep_search``
-  extracts line matches and has nothing to highlight; file listing is a separate concern)
-  and a query whose only atom matches zero-width (e.g. ``/^/``, ``/\b/`` -- dropped as
-  non-highlights, not flagged ``regex_incompatible`` since the pattern compiled fine).
+  non-empty highlight span, so two query shapes the SQL predicate *does* match still return
+  no files. Both are now **announced by name** rather than returning a silent empty result
+  indistinguishable from a true negative (issue #31):
+
+  1. A filter-only query with no content atom (e.g. ``lang:go`` alone -- there is nothing to
+     highlight; file listing is a separate concern) sets ``no_content_atom``.
+  2. A query whose atoms all match zero-width (e.g. ``/^/``, ``/\b/`` -- dropped as
+     non-highlights, and NOT ``regex_incompatible`` since the pattern compiled fine) sets
+     ``zero_width_only_atoms``.
+
+  Both flags are guarded by ``regex_incompatible`` (see :func:`_no_content_atom` /
+  :func:`_zero_width_only_atoms`): an atom that never compiled is a content atom whose
+  highlighting capability is *unknown*, and ``regex_incompatible`` is already its signal.
+  Neither flag covers the **case-folding divergence** described in the NOT-RE2 bullet above:
+  a file the SQL predicate matched case-insensitively that yields zero Python highlights
+  drops out with patterns present, non-empty, and of non-zero width -- so it is
+  **still entirely unsignalled**. Fixing that needs a new provable signal (follow-up), not
+  one of these two.
 * **Uncapped Python CPU (V1 limitation).** The byte cap bounds memory and aggregate bytes
   scanned but NOT CPU/wall-clock: a catastrophic-backtracking ``re`` pattern on a single
   *under-cap* file runs unbounded, holds the GIL, and can starve the app.
@@ -115,12 +128,35 @@ class FileMatches:
 @dataclass(frozen=True)
 class GrepResult:
     """A grep result. ``truncated`` (with ``truncation_reason``) flags a partial result;
-    a total failure raises :class:`QueryTooBroadError` instead of returning."""
+    a total failure raises :class:`QueryTooBroadError` instead of returning.
+
+    ``no_content_atom`` and ``zero_width_only_atoms`` are raw structural facts about **this
+    leg only** (issue #31). grep reports; it does not know whether a second leg answered the
+    query -- a ``sym:foo`` query is genuinely filter-only *here* and is answered by
+    :func:`app.search.symbols.symbol_search` *there*, so ``no_content_atom`` is ``True`` for
+    it and the envelope (``app/main.py``) is what ANDs in "the symbol leg did not answer".
+    Special-casing ``SymbolFilter`` here would make grep lie to a direct caller that runs no
+    symbol leg.
+
+    Invariants:
+
+    * **Mutually exclusive by construction.** ``no_content_atom`` requires ``not patterns``;
+      ``zero_width_only_atoms`` requires ``bool(patterns)``. Neither, or one, or the other --
+      never both. This also holds at the envelope layer, which only ever clears flags.
+    * **``zero_width_only_atoms=True`` implies ``files`` is empty -- AT THIS LAYER.** Every
+      span is dropped by the ``m.end() > m.start()`` check in :func:`extract_line_matches`,
+      so no :class:`FileMatches` is ever built. The scope matters: at the envelope layer the
+      same field can sit beside a non-empty ``files`` (``sym:Handler /^/`` folds symbol
+      matches in), and it holds there only *because* the envelope suppresses the flag in
+      exactly that case.
+    """
 
     files: tuple[FileMatches, ...]  # in (repo_id, path) order
     truncated: bool  # byte cap OR row cap tripped
     truncation_reason: str | None  # "byte_cap" | "row_cap" | None
     regex_incompatible: bool  # some Regex atom failed Python re.compile
+    no_content_atom: bool  # no content atom at all (filter-only query), nothing compiled away
+    zero_width_only_atoms: bool  # content atoms present, every one provably zero-width
 
 
 # ----------------------------------------------------------------------- pure helpers
@@ -165,6 +201,63 @@ def _build_matchers(node: Node, case_sensitive: bool) -> tuple[list[re.Pattern[s
     patterns: list[re.Pattern[str]] = []
     regex_incompatible = _collect_matchers(node, flags, patterns)
     return patterns, regex_incompatible
+
+
+def _no_content_atom(patterns: Sequence[re.Pattern[str]], regex_incompatible: bool) -> bool:
+    """True when the query carries no content atom at all -- a filter-only query (issue #31).
+
+    ``regex_incompatible`` is a REQUIRED conjunct, not a refinement: ``_collect_matchers``
+    swallows ``re.error`` and appends nothing, so an uncompilable regex such as ``/[/`` also
+    yields ``patterns == []`` despite being a content atom. That query is not filter-only --
+    it *has* an atom the SQL predicate honoured and Python could not -- and its signal is
+    ``regex_incompatible``, which is already set. Without the conjunct the two conditions
+    would be reported as the same thing.
+    """
+    return not patterns and not regex_incompatible
+
+
+def _zero_width_only_atoms(patterns: Sequence[re.Pattern[str]], regex_incompatible: bool) -> bool:
+    """True when every content atom provably matches zero-width, so nothing can highlight.
+
+    ``re._parser.parse(src).getwidth()`` returns ``(min_width, max_width)``; a ``max_width``
+    of 0 **proves** the atom can never produce a non-empty span, so the ``m.end() > m.start()``
+    check in :func:`extract_line_matches` always drops it. ``^``, ``$``, ``\\b`` and lookarounds
+    all report ``(0, 0)``.
+
+    Sound (given the guards) but **incomplete**: ``a*`` reports a huge ``max_width`` and is
+    correctly not flagged -- it genuinely *can* highlight, so a flag would be wrong.
+    (``re.compile('a*').finditer('bar')`` yields the non-empty span ``(1, 2)``; see
+    ``test_zero_width_regex_matches_are_dropped``.) The residual gap is corpus-dependent and NOT
+    statically decidable: ``a*`` over a corpus containing no ``a`` returns zero files unflagged.
+    The error direction is false-negatives -- silence -- only, which is what makes the
+    private-API dependency below acceptable.
+
+    ``regex_incompatible`` is a REQUIRED conjunct, mirroring :func:`_no_content_atom`. For
+    ``/^/ /[/`` the ``[`` atom never compiled, so it is absent from ``patterns`` and its
+    highlighting capability is **unknown, not proven zero-width**. Without the conjunct this
+    would claim a proof it does not have.
+
+    Empty terms are **reachable and correctly flagged**: ``parse('""')`` yields
+    ``Substring(value='')`` and ``parse('//')`` yields ``Regex(pattern='')``, both compiling to
+    a width-``(0, 0)`` pattern whose ``finditer`` yields only zero-width hits -- all dropped.
+    ``True`` is the right answer for them; no guard is needed.
+
+    **Private-API access site is load-bearing.** ``re._parser`` is a private CPython module and
+    is reached HERE, inside the guarded body, never as a module-scope import beside ``import
+    re``. A module-scope import that fails on a future CPython would take down this module,
+    hence ``app/main.py``, hence the whole MCP server -- corruption instead of containment.
+    Reached this way, the ``except Exception`` degrades the flag to ``False``, i.e. exactly the
+    pre-issue-#31 behaviour, and ``test_getwidth_private_api_canary`` fails loudly in CI at
+    upgrade so the degradation is never silent.
+    """
+    if not patterns or regex_incompatible:
+        return False
+    try:
+        # getattr, not `import re._parser`: the access stays inside this guarded body.
+        parser = getattr(re, "_parser")
+        return all(parser.parse(pattern.pattern).getwidth()[1] == 0 for pattern in patterns)
+    except Exception:
+        return False
 
 
 def _merge_spans(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -256,6 +349,8 @@ def grep_search(
     node = parse(query)
     case_sensitive = resolve_case(query)
     patterns, regex_incompatible = _build_matchers(node, case_sensitive)
+    no_content_atom = _no_content_atom(patterns, regex_incompatible)
+    zero_width_only_atoms = _zero_width_only_atoms(patterns, regex_incompatible)
     stmt = compile_query(node, limit=row_limit, case_sensitive=case_sensitive)
 
     files: list[FileMatches] = []
@@ -279,7 +374,16 @@ def grep_search(
         row_capped = len(rows) >= row_limit
         ids = [row.id for row in rows]
         if not ids:
-            return GrepResult((), row_capped, "row_cap" if row_capped else None, regex_incompatible)
+            # Keyword form is required, not cosmetic: a future field must not silently
+            # mis-bind into `truncated`.
+            return GrepResult(
+                files=(),
+                truncated=row_capped,
+                truncation_reason="row_cap" if row_capped else None,
+                regex_incompatible=regex_incompatible,
+                no_content_atom=no_content_atom,
+                zero_width_only_atoms=zero_width_only_atoms,
+            )
 
         content_stmt = (
             select(File.id, File.repo_id, File.path, File.lang, File.content)
@@ -309,4 +413,11 @@ def grep_search(
 
     truncated = byte_capped or row_capped
     reason = "byte_cap" if byte_capped else ("row_cap" if row_capped else None)
-    return GrepResult(tuple(files), truncated, reason, regex_incompatible)
+    return GrepResult(
+        files=tuple(files),
+        truncated=truncated,
+        truncation_reason=reason,
+        regex_incompatible=regex_incompatible,
+        no_content_atom=no_content_atom,
+        zero_width_only_atoms=zero_width_only_atoms,
+    )

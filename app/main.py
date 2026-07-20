@@ -23,10 +23,10 @@ deliberate divergences from that reference are load-bearing:
    shutdown via ``atexit``; the per-session lifespan only *references* it and never disposes.
 
 Recoverable conditions (``truncated``, ``query_too_broad``, ``query_parse_error``,
-``regex_incompatible``) are structured payload fields, never exceptions; only genuinely
-unexpected faults reach the ``_dispatch`` choke-point, which logs a full traceback and
-re-raises (never swallows). Output shapes are pinned to the zoekt parity fixtures in
-``.omc/plans/zoekt-reference-shapes.md``.
+``regex_incompatible``, ``no_content_atom``, ``zero_width_only_atoms``) are structured payload
+fields, never exceptions; only genuinely unexpected faults reach the ``_dispatch``
+choke-point, which logs a full traceback and re-raises (never swallows). Output shapes are
+pinned to the zoekt parity assertions in ``tests/unit/test_main.py``.
 """
 
 from __future__ import annotations
@@ -108,6 +108,11 @@ def _signals(payload: dict[str, Any]) -> dict[str, Any]:
         "truncated": payload.get("truncated"),
         "query_too_broad": payload.get("query_too_broad"),
         "query_parse_error": payload.get("query_parse_error"),
+        # Query-shape signals (issue #31): a filter-only or all-zero-width query returns zero
+        # files legitimately, so without these a shape problem is indistinguishable in the logs
+        # from a genuine no-match.
+        "no_content_atom": payload.get("no_content_atom"),
+        "zero_width_only_atoms": payload.get("zero_width_only_atoms"),
         # Without this, a flag-on-before-migrate misconfiguration is invisible in logs: every
         # semantic query returns empty and reads identically to a genuine zero-result query.
         "semantic_schema_missing": payload.get("semantic_schema_missing"),
@@ -151,7 +156,7 @@ def _clamp_limit(limit: int, cfg: Settings) -> int:
 #
 # Pure-ish builders (engine + config in, dict out) so unit tests pin the exact wire shape
 # without the SDK. Each opens its own connection INSIDE the worker thread (never shares one
-# across threads). Shapes are pinned to zoekt parity (.omc/plans/zoekt-reference-shapes.md).
+# across threads). Shapes are pinned to zoekt parity (tests/unit/test_main.py).
 
 
 def _repo_name_map(conn: Any) -> dict[int, str]:
@@ -171,8 +176,26 @@ def _search_envelope(
     regex_incompatible: bool,
     query_too_broad: bool,
     query_parse_error: str | None,
+    no_content_atom: bool,
+    zero_width_only_atoms: bool,
 ) -> dict[str, Any]:
-    """Build the pinned ``search_code`` envelope (zoekt fields + additive signal fields)."""
+    """Build the pinned ``search_code`` envelope (zoekt fields + additive signal fields).
+
+    ``no_content_atom`` -- the query carried no content atom at all (e.g. ``lang:go``), so
+    there was nothing to highlight and zero files is a *shape* outcome, not a true negative.
+    ``zero_width_only_atoms`` -- content atoms were present but every one provably matches
+    zero-width (e.g. ``/^/``), so every span was dropped. Mutually exclusive by construction.
+
+    Both are grep's per-leg fact AND-ed with "the symbol leg did not answer this query", so
+    neither ever fires beside results the caller can see. That suppression is what carries
+    grep's own invariants (see :class:`app.search.grep.GrepResult`) up to this layer:
+
+        If ``zero_width_only_atoms`` survives suppression then ``sym_answers`` is False, so
+        ``sym_result`` is non-None with ``no_symbol_atom=True``, so ``sym_result.symbols`` is
+        empty, so ``files`` comes only from grep -- which is empty by grep's invariant. QED
+
+    Additive and permanent: agents may depend on these keys, so they can never be removed.
+    """
     return {
         "query": query,
         "file_count": file_count,
@@ -184,6 +207,8 @@ def _search_envelope(
         "regex_incompatible": regex_incompatible,
         "query_too_broad": query_too_broad,
         "query_parse_error": query_parse_error,
+        "no_content_atom": no_content_atom,
+        "zero_width_only_atoms": zero_width_only_atoms,
     }
 
 
@@ -199,6 +224,22 @@ def _search_code_payload(engine: Engine, cfg: Settings, query: str, limit: int) 
     (either leg) -> ``query_too_broad`` + ``truncated``. ``repo_id`` is resolved to ``Repo.name``.
     ``byte_ranges`` are our UTF-8 line-local half-open offsets (documented divergence from
     zoekt's char ``start_col``/``end_col``).
+
+    **Query-shape suppression (issue #31).** grep's ``no_content_atom`` /
+    ``zero_width_only_atoms`` are per-leg facts; both are ANDed here with ``not sym_answers``
+    so neither fires on a query the symbol leg answered. ``sym:Handler`` is filter-only to grep
+    but fully answered here, and ``sym:Handler /^/`` is zero-width-only to grep yet returns
+    files -- flagging either would contradict the results sitting beside it and train agents to
+    ignore the signal.
+
+    ``sym_answers`` treats an UNKNOWN symbol leg (``sym_result is None``, i.e. the leg timed
+    out) as answering, which is a proof rather than a precaution: ``None`` arises only from
+    ``QueryTooBroadError``, which means the DB was hit, which means the ``if not patterns``
+    short-circuit at ``symbols.py:173`` was False, which means the query HAD a ``sym:`` atom.
+    The inverted form (``sym_result is not None and ...``) would emit a false flag on exactly
+    that timed-out ``sym:`` query. Corollary: suppression can never swallow the filter-only
+    case this issue exists to signal -- a query like ``file:.md`` has no ``sym:`` atom, so it
+    short-circuits before any DB hit and can never reach ``sym_result is None``.
     """
     with engine.connect() as conn:
         t0 = time.monotonic()
@@ -222,6 +263,8 @@ def _search_code_payload(engine: Engine, cfg: Settings, query: str, limit: int) 
                 regex_incompatible=False,
                 query_too_broad=False,
                 query_parse_error=str(error),
+                no_content_atom=False,
+                zero_width_only_atoms=False,
             )
         except QueryTooBroadError:
             # The whole query is over the time budget; the symbol leg would time out too.
@@ -236,6 +279,8 @@ def _search_code_payload(engine: Engine, cfg: Settings, query: str, limit: int) 
                 regex_incompatible=False,
                 query_too_broad=True,
                 query_parse_error=None,
+                no_content_atom=False,
+                zero_width_only_atoms=False,
             )
 
         # Symbol leg: sym: definitions the highlight-driven grep path cannot return. A timeout
@@ -322,6 +367,12 @@ def _search_code_payload(engine: Engine, cfg: Settings, query: str, limit: int) 
             }
         )
 
+    # `is None or` is load-bearing: an unknown (timed-out) symbol leg counts as answering, and
+    # is provably always the sym-bearing shape. See the docstring.
+    sym_answers = sym_result is None or not sym_result.no_symbol_atom
+    no_content_atom = result.no_content_atom and not sym_answers
+    zero_width_only_atoms = result.zero_width_only_atoms and not sym_answers
+
     sym_truncated = sym_result.truncated if sym_result is not None else False
     truncated = result.truncated or sym_truncated or query_too_broad
     truncation_reason = result.truncation_reason or (
@@ -338,6 +389,8 @@ def _search_code_payload(engine: Engine, cfg: Settings, query: str, limit: int) 
         regex_incompatible=result.regex_incompatible,
         query_too_broad=query_too_broad,
         query_parse_error=None,
+        no_content_atom=no_content_atom,
+        zero_width_only_atoms=zero_width_only_atoms,
     )
 
 
@@ -415,7 +468,10 @@ async def search_code(query: str, ctx: Context, limit: int = 200) -> str:
     Supports ``repo:``/``file:``/``lang:``/``sym:`` filters, ``case:yes``, boolean AND
     (whitespace) / OR, and ``/regex/`` patterns. ``limit`` caps the number of files scanned
     (clamped to a server maximum). Recoverable conditions surface as fields
-    (``query_parse_error``, ``query_too_broad``, ``truncated``, ``regex_incompatible``).
+    (``query_parse_error``, ``query_too_broad``, ``truncated``, ``regex_incompatible``,
+    ``no_content_atom``, ``zero_width_only_atoms``). The last two explain an empty result that
+    is NOT a true negative: the query carried no content atom to highlight (e.g. ``lang:go``
+    alone) or every atom it carried matches zero-width (e.g. ``/^/``).
     """
     lc = ctx.request_context.lifespan_context
     engine, cfg = lc["engine"], lc["config"]

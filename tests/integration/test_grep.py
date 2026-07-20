@@ -98,6 +98,17 @@ def seeded() -> Iterator[Seeded]:
             lang="python",
             content="# beta foo note\n# Foo capitalized here\n",
         )
+        # Markdown file: exists solely so `file:.md` -- the query from the reported issue #31
+        # incident -- has a genuine SQL-predicate match to return zero highlights for. Its
+        # content deliberately contains NO "foo"/"Foo" and nothing matching /f.o/ (it has no
+        # "f" at all), so adding it leaves every existing exact-path assertion above untouched.
+        _insert_file(
+            conn,
+            beta_id,
+            "docs/readme.md",
+            lang="markdown",
+            content="# Beta tools\n\nSome prose about the widget library.\n",
+        )
         conn.commit()
 
         yield Seeded(conn=conn, acme_id=acme_id, beta_id=beta_id)
@@ -123,6 +134,9 @@ def test_grep_groups_matches_per_file_in_repo_id_path_order(seeded: Seeded) -> N
     assert _paths(result) == ["src/handler.go", "src/util.go", "pkg/note.py"]
     assert result.truncated is False
     assert result.truncation_reason is None
+    # An ordinary content query proves neither query-shape condition (#31).
+    assert result.no_content_atom is False
+    assert result.zero_width_only_atoms is False
 
     handler = result.files[0]
     # "// foo lives here and foo again" is line 3, with two matches merged into two spans.
@@ -287,3 +301,62 @@ def test_no_match_query_is_complete_and_untruncated(seeded: Seeded) -> None:
     assert result.files == ()
     assert result.truncated is False
     assert result.truncation_reason is None
+    # A TRUE negative: zero files with both shape flags False is what makes the flags mean
+    # something when they DO fire (see the filter-only test below).
+    assert result.no_content_atom is False
+    assert result.zero_width_only_atoms is False
+
+
+# ------------------------------------------------------------ 10. query-shape flags (#31)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("query", ["file:.md", "file:.py"])
+def test_filter_only_query_returns_no_files_but_flags_no_content_atom(
+    seeded: Seeded, query: str
+) -> None:
+    # LITERAL reproduction of the reported bug. `file:.md` is verbatim the query from the
+    # incident: an agent ran it, got zero files, and concluded the repo had no markdown -- the
+    # seeded corpus DOES contain docs/readme.md, so the SQL predicate matches and the empty
+    # result comes purely from having nothing to highlight. Previously indistinguishable from
+    # "no such file exists"; now announced. Keep `.md` first and keep it verbatim: if this
+    # test ever fails, the reader should see the reported bug, not have to reconstruct it.
+    # `.py` rides along for a second extension's worth of coverage. [AC1]
+    result = grep_search(seeded.conn, query)
+    assert result.files == ()
+    assert result.no_content_atom is True
+    assert result.zero_width_only_atoms is False
+    assert result.regex_incompatible is False
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("query", [r"/^/", r"/\b/"])
+def test_zero_width_only_regex_flags_without_regex_incompatible(seeded: Seeded, query: str) -> None:
+    # These compile fine (so regex_incompatible stays False) but every span is dropped as a
+    # zero-width match, leaving an empty result the old envelope could not explain. [AC3]
+    result = grep_search(seeded.conn, query)
+    assert result.files == ()
+    assert result.zero_width_only_atoms is True
+    assert result.regex_incompatible is False
+    assert result.no_content_atom is False
+
+
+@pytest.mark.integration
+def test_content_query_sets_neither_flag(seeded: Seeded) -> None:
+    # Same corpus as the grouping test: real matches, neither flag. [AC2]
+    result = grep_search(seeded.conn, "Handler")
+    assert result.files
+    assert result.no_content_atom is False
+    assert result.zero_width_only_atoms is False
+
+
+@pytest.mark.integration
+def test_or_true_negative_does_not_set_either_flag(seeded: Seeded) -> None:
+    # OR lowers to a UNION candidate set, so `lang:go` supplies candidates while the content
+    # atom matches nothing -> zero files with a NON-EMPTY candidate set. A runtime
+    # "matched but produced no highlights" heuristic fires here, on an ordinary true negative;
+    # a provable flag must not. Pins that the rejected heuristic has not crept back in.
+    result = grep_search(seeded.conn, "zzz_nonexistent OR lang:go")
+    assert result.files == ()
+    assert result.no_content_atom is False
+    assert result.zero_width_only_atoms is False

@@ -221,6 +221,20 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 for start, end in m["byte_ranges"]:
                     assert m["text"].encode("utf-8")[start:end] == b"foo"
 
+                # The query-shape keys (#31) survive json.dumps in _dispatch and reach the
+                # wire; a content query proves neither condition. [AC4]
+                assert search["no_content_atom"] is False
+                assert search["zero_width_only_atoms"] is False
+
+                # A filter-only query over the real server: zero files, announced by name
+                # rather than returned as a silent empty result. [AC1]
+                filter_only = _tool_json(
+                    await session.call_tool("search_code", {"query": "lang:go"})
+                )
+                assert filter_only["file_count"] == 0
+                assert filter_only["no_content_atom"] is True
+                assert filter_only["zero_width_only_atoms"] is False
+
                 # sym: folds into search_code (zoekt parity): a sym:-only query the
                 # highlight-driven grep path cannot answer returns symbol definitions.
                 sym = _tool_json(await session.call_tool("search_code", {"query": "sym:Handler"}))
