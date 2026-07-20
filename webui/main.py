@@ -28,9 +28,10 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import anyio
-from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
@@ -90,20 +91,25 @@ SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 
 class SPAStaticFiles(StaticFiles):
-    """Serve the built SPA, falling back to ``index.html`` for any unmatched path.
+    """Serve the built SPA, falling back to ``index.html`` for any unmatched NON-API path.
 
     Client-side routes (e.g. ``/file?repo=x&path=y``) are not real files on disk; without this
     override, a hard refresh or a direct deep link would 404 instead of loading the SPA shell
     and letting ``src/router.ts`` hydrate from ``location``. This is mounted at ``/`` AFTER all
-    API routers in :func:`create_app`, so ``/api/*``/``/health``/``/ready`` are matched first
-    and never reach here.
+    API routers in :func:`create_app`, so a REGISTERED ``/api/*``/``/health``/``/ready`` route
+    is matched first and never reaches here -- but an UNREGISTERED ``/api/*`` path (a typo, a
+    retired route) also falls through to this mount, and without the ``/api/`` exclusion below
+    would silently return the SPA's HTML shell with a 200, not a 404, to an API caller
+    expecting JSON. Re-raising leaves it to Starlette's default ``HTTPException`` handler,
+    which renders ``{"detail": ...}`` as JSON -- so ``/api/*`` 404s are JSON, everything else
+    still gets the SPA fallback.
     """
 
     async def get_response(self, path: str, scope: Scope) -> Any:
         try:
             return await super().get_response(path, scope)
         except StarletteHTTPException as exc:
-            if exc.status_code == 404:
+            if exc.status_code == 404 and not scope["path"].startswith("/api/"):
                 return await super().get_response("index.html", scope)
             raise
 
@@ -157,6 +163,12 @@ async def api_search(
     (a structured signal, matching the MCP tools' "recoverable conditions are payload
     fields, never exceptions" contract -- see ``app/main.py``'s module docstring). So the
     400 mapping here inspects the payload rather than catching an exception.
+
+    A ``cursor`` decodes structurally fine (passes :func:`service.decode_cursor`'s checks) but
+    can still carry a NUL byte in its ``path`` -- decode_cursor validates shape/type, not byte
+    content. That NUL then reaches a bound SQL parameter in the resumed candidate scan, where
+    Postgres itself rejects it (``sqlalchemy.exc.DataError``: "PostgreSQL text fields cannot
+    contain NUL (0x00) bytes"), 500ing an attacker-controlled input instead of 400ing it.
     """
     clamped = service.clamp_limit(limit, cfg)
     try:
@@ -165,6 +177,8 @@ async def api_search(
         )
     except CursorError as error:
         raise HTTPException(status_code=400, detail={"error": str(error)}) from error
+    except DataError as error:
+        raise HTTPException(status_code=400, detail={"error": "invalid parameter"}) from error
     if payload["query_parse_error"] is not None:
         raise HTTPException(status_code=400, detail={"error": payload["query_parse_error"]})
     return payload
@@ -176,8 +190,17 @@ async def api_file(
     repo: Annotated[str, Query(min_length=1)],
     path: Annotated[str, Query(min_length=1)],
 ) -> dict[str, Any]:
-    """Return one file's full content by (repo name, path); a miss is a 404."""
-    payload = await _run_blocking(lambda: service.get_file_payload(engine, cfg, repo, path))
+    """Return one file's full content by (repo name, path); a miss is a 404.
+
+    A ``repo``/``path`` containing a NUL byte reaches a bound SQL parameter in
+    :func:`service.get_file_payload`'s lookup, where Postgres rejects it
+    (``sqlalchemy.exc.DataError``) rather than simply matching zero rows -- without this,
+    that 500s an attacker-controlled input instead of 400ing it.
+    """
+    try:
+        payload = await _run_blocking(lambda: service.get_file_payload(engine, cfg, repo, path))
+    except DataError as error:
+        raise HTTPException(status_code=400, detail={"error": "invalid parameter"}) from error
     if not payload["found"]:
         detail = {"error": f"{repo}/{path} not found", "repo": repo, "path": path}
         raise HTTPException(status_code=404, detail=detail)
@@ -189,12 +212,33 @@ async def api_repos(engine: EngineDep, cfg: SettingsDep) -> dict[str, Any]:
     return await _run_blocking(lambda: service.list_repos_payload(engine, cfg))
 
 
+# ----------------------------------------------------------------------- security headers
+
+
+async def _add_security_headers(request: Request, call_next: Callable[[Request], Any]) -> Response:
+    """Set a minimal security header set on every response (API routes and the SPA alike).
+
+    ``X-Content-Type-Options: nosniff`` stops a browser from MIME-sniffing a response into
+    executable content; ``X-Frame-Options: DENY`` blocks this app from being framed
+    (clickjacking). A full Content-Security-Policy is deliberately deferred: Shiki's syntax
+    highlighting emits inline per-token ``style="color:..."`` attributes
+    (``webui/frontend/src/components/CodeBlock.tsx``), which a strict CSP would need
+    ``style-src 'unsafe-inline'`` (or a nonce/hash scheme) to allow without breaking file
+    view -- tracked as follow-up work in ``docs/runbooks/webui.md``.
+    """
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    return response
+
+
 # --------------------------------------------------------------------------- ASGI export
 
 
 def create_app() -> FastAPI:
-    """Build the FastAPI app: API routers first, then the SPA mount (so routes win)."""
+    """Build the FastAPI app: security headers, then API routers, then the SPA mount."""
     app = FastAPI(title="code-search webui")
+    app.middleware("http")(_add_security_headers)
 
     app.get("/health")(health)
     app.get("/ready")(ready)

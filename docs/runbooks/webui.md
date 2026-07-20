@@ -37,6 +37,16 @@ client id) is safe if grants ever need reapplying out of band. Like the MCP app,
 `SELECT 1 FROM repos LIMIT 1` is the grant oracle: a missing grant surfaces as a 503, not a
 silent empty result.
 
+## Security headers
+
+Every response (API routes and the SPA alike) carries `X-Content-Type-Options: nosniff` and
+`X-Frame-Options: DENY` (`webui/main.py`'s `_add_security_headers` middleware). A
+Content-Security-Policy is deliberately NOT set yet: Shiki's syntax highlighting
+(`webui/frontend/src/components/CodeBlock.tsx`) emits inline per-token `style="color:..."`
+attributes, which a strict CSP would need `style-src 'unsafe-inline'` (or a nonce/hash scheme
+threaded through Shiki's token rendering) to allow without breaking the file view. Tracked as
+open follow-up work — add a CSP once that inline-style path is addressed.
+
 ## Rebuilding the frontend
 
 The production frontend build (`webui/frontend/dist/`) is **committed** — CI and deploy do

@@ -16,12 +16,17 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import DataError
 
 from app import service
 from app.config import Settings
 from app.query.parser import QueryParseError
 from app.search.grep import FileCursor, FileMatches, GrepResult, LineMatch
 from webui.main import app, get_engine, get_settings
+
+_NUL_BYTE_ERROR = DataError(
+    "SELECT 1", {}, ValueError("PostgreSQL text fields cannot contain NUL (0x00) bytes")
+)
 
 
 def _cfg() -> Settings:
@@ -53,9 +58,16 @@ class _FakeResult:
 class _FakeConn:
     """Minimal Connection stand-in: records SQL and returns canned rows by call order."""
 
-    def __init__(self, results: list[Any], *, raise_on_driver_sql: bool = False) -> None:
+    def __init__(
+        self,
+        results: list[Any],
+        *,
+        raise_on_driver_sql: bool = False,
+        raise_on_execute: Exception | None = None,
+    ) -> None:
         self._results = list(results)
         self._raise_on_driver_sql = raise_on_driver_sql
+        self._raise_on_execute = raise_on_execute
         self.driver_sql: list[str] = []
 
     def __enter__(self) -> _FakeConn:
@@ -73,14 +85,24 @@ class _FakeConn:
         self.driver_sql.append(sql)
 
     def execute(self, *_args: object, **_kwargs: object) -> _FakeResult:
+        if self._raise_on_execute is not None:
+            raise self._raise_on_execute
         return self._results.pop(0)
 
 
 class _FakeEngine:
     def __init__(
-        self, results: list[Any] | None = None, *, raise_on_driver_sql: bool = False
+        self,
+        results: list[Any] | None = None,
+        *,
+        raise_on_driver_sql: bool = False,
+        raise_on_execute: Exception | None = None,
     ) -> None:
-        self._conn = _FakeConn(results or [], raise_on_driver_sql=raise_on_driver_sql)
+        self._conn = _FakeConn(
+            results or [],
+            raise_on_driver_sql=raise_on_driver_sql,
+            raise_on_execute=raise_on_execute,
+        )
 
     def connect(self) -> _FakeConn:
         return self._conn
@@ -233,6 +255,28 @@ def test_api_search_bad_cursor_is_400(client: TestClient, monkeypatch: pytest.Mo
     assert "error" in resp.json()["detail"]
 
 
+@pytest.mark.unit
+def test_api_search_nul_byte_in_cursor_path_is_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A cursor whose decoded path carries a NUL byte passes decode_cursor's shape/type checks
+    # (it validates structure, not byte content) but Postgres rejects the NUL once it reaches a
+    # bound SQL parameter in the resumed candidate scan -- reproduced here by having the
+    # (structurally valid) cursor's resulting grep_search call raise the same DataError that a
+    # real Postgres round-trip raises (verified against a live local Postgres: `sqlalchemy.exc
+    # .DataError` wrapping psycopg's "PostgreSQL text fields cannot contain NUL (0x00) bytes").
+    def _raise(*_a: object, **_k: object) -> GrepResult:
+        raise _NUL_BYTE_ERROR
+
+    monkeypatch.setattr(service, "grep_search", _raise)
+    cursor = service.encode_cursor(FileCursor(repo_id=1, path="foo\x00bar"))
+
+    resp = client.get("/api/search", params={"q": "foo", "cursor": cursor})
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "invalid parameter"
+
+
 # ----------------------------------------------------------------------------------- /api/file
 
 
@@ -271,6 +315,25 @@ def test_api_file_missing_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["path"] == "missing.py"
 
 
+@pytest.mark.unit
+def test_api_file_nul_byte_in_path_is_400() -> None:
+    # repo/path reach a bound SQL parameter in service.get_file_payload's lookup; Postgres
+    # rejects a NUL byte there (verified against a live local Postgres -- see
+    # test_api_search_nul_byte_in_cursor_path_is_400) rather than simply matching zero rows.
+    engine = _FakeEngine(raise_on_execute=_NUL_BYTE_ERROR)
+    app.dependency_overrides[get_engine] = lambda: engine
+    app.dependency_overrides[get_settings] = _cfg
+    try:
+        with TestClient(app) as test_client:
+            resp = test_client.get(
+                "/api/file", params={"repo": "acme/widgets", "path": "foo\x00bar"}
+            )
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error"] == "invalid parameter"
+
+
 # ---------------------------------------------------------------------------------- /api/repos
 
 
@@ -302,3 +365,49 @@ def test_api_repos_lists_indexed_repos() -> None:
     assert body["count"] == 1
     assert body["repos"][0]["name"] == "acme/widgets"
     assert body["repos"][0]["last_indexed_commit"] == "deadbeef"
+
+
+# --------------------------------------------------------------------- security headers
+
+
+@pytest.mark.unit
+def test_security_headers_present_on_every_response() -> None:
+    # The middleware wraps ALL responses (API and SPA alike) -- proven here on /health, which
+    # takes no dependency overrides, so this test can't accidentally pass because of DB fakery.
+    with TestClient(app) as test_client:
+        resp = test_client.get("/health")
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["x-frame-options"] == "DENY"
+
+
+@pytest.mark.unit
+def test_security_headers_present_on_error_response() -> None:
+    with TestClient(app) as test_client:
+        resp = test_client.get("/api/does-not-exist")
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["x-frame-options"] == "DENY"
+
+
+# ------------------------------------------------------------------- unmatched /api/* paths
+
+
+@pytest.mark.unit
+def test_unknown_api_path_is_json_404_not_spa_shell() -> None:
+    # Before the SPAStaticFiles fix, any /api/* path not matched by a registered router fell
+    # through to the SPA mount, which served index.html with a 200 -- an API caller expecting
+    # JSON got an HTML document instead of a 404.
+    with TestClient(app) as test_client:
+        resp = test_client.get("/api/does-not-exist")
+    assert resp.status_code == 404
+    assert resp.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.unit
+def test_unknown_non_api_path_still_falls_back_to_spa_shell() -> None:
+    # A client-side route (e.g. a deep link to /file?repo=x&path=y, or any path the SPA router
+    # owns) is not a real file on disk; it must still get the SPA shell, not a bare 404 -- the
+    # /api/ exclusion in SPAStaticFiles must not regress this.
+    with TestClient(app) as test_client:
+        resp = test_client.get("/some/client-side/route")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
