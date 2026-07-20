@@ -21,6 +21,7 @@ dependencies = [
     "tree-sitter-language-pack",
     "pydantic-settings",
     "pyyaml>=6.0",
+    "fastapi>=0.139.2",
 ]
 
 [project.scripts]
