@@ -32,9 +32,9 @@ splitter (`src/utils/byteRanges.ts`, exercised with multi-byte/emoji lines) and 
 paginated-search reducer (`src/utils/searchReducer.ts`, cursor-append / banner-per-page
 semantics), plus the flat-AND query recognizer (`src/utils/queryModel.ts`) that drives the
 repo/lang/branch filter chips, whose `queryModel.corpus.json` corpus is also asserted against
-the real Python parser by `tests/unit/test_query_corpus_parity.py`. Advisory only — not part
-of `make lint`/`make test`, except that shared corpus parity test itself (a `pytest -m unit`
-test, gated in CI's `webui` job for the frontend half).
+the real Python parser by `tests/unit/test_query_corpus_parity.py`. The vitest suite runs in
+CI's `webui` job (`make webui-test`); the Python half of the corpus parity check is a
+`pytest -m unit` test and runs under `make test` in the `unit` job.
 
 ## Notable choices
 

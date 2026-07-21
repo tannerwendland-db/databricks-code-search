@@ -21,7 +21,9 @@ import pytest
 
 from app.query.parser import QueryParseError, TokenKind, tokenize
 
-_CORPUS_PATH = Path("webui/frontend/src/utils/queryModel.corpus.json")
+_CORPUS_PATH = (
+    Path(__file__).resolve().parents[2] / "webui/frontend/src/utils/queryModel.corpus.json"
+)
 
 # Maps the TS Atom.field name (None for a content atom) to the TokenKind tokenize() emits.
 _FIELD_TO_KIND: dict[str | None, TokenKind] = {
