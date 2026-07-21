@@ -9,6 +9,7 @@ import pytest
 
 from app.query.parser import (
     And,
+    BranchFilter,
     LangFilter,
     Or,
     PathFilter,
@@ -41,6 +42,11 @@ def test_lang_filter() -> None:
 @pytest.mark.unit
 def test_sym_filter() -> None:
     assert parse("sym:Name") == SymbolFilter("Name")
+
+
+@pytest.mark.unit
+def test_branch_filter() -> None:
+    assert parse("branch:main") == BranchFilter("main")
 
 
 @pytest.mark.unit
@@ -110,7 +116,7 @@ def test_non_field_colon_lexemes_are_raw_substrings(query: str) -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("query", ["content:x", "branch:main", "r:x", "s:x"])
+@pytest.mark.parametrize("query", ["content:x", "r:x", "s:x", "b:x"])
 def test_reserved_fields_raise(query: str) -> None:
     with pytest.raises(QueryParseError):
         parse(query)

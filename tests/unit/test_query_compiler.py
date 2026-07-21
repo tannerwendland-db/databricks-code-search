@@ -129,6 +129,47 @@ def test_symbol_filter_is_correlated_exists() -> None:
     assert "Handler" in _param_values(params)
 
 
+# ------------------------------------------------------------------------- branch (0003)
+
+
+@pytest.mark.unit
+def test_branch_filter_is_gin_served_array_contains() -> None:
+    sql, params = _render("branch:main")
+    assert "files.branches @>" in sql
+    assert ["main"] in params.values()
+    # An explicit branch: opts out of the implicit default-branch conjunct.
+    assert "EXISTS (SELECT repos.id" not in sql
+
+
+@pytest.mark.unit
+def test_no_branch_filter_ands_in_implicit_default_conjunct() -> None:
+    sql, _params = _render("foo")
+    assert "EXISTS (SELECT repos.id" in sql
+    assert "repos.id = files.repo_id" in sql
+    assert "coalesce(repos.default_branch," in sql
+    assert "= ANY (files.branches)" in sql
+
+
+@pytest.mark.unit
+def test_default_conjunct_coalesce_defaults_to_head() -> None:
+    sql, params = _render("foo")
+    assert "HEAD" in _param_values(params)
+
+
+@pytest.mark.unit
+def test_branch_filter_nested_in_and_still_suppresses_default_conjunct() -> None:
+    sql, _params = _render("foo branch:main")
+    assert "files.branches @>" in sql
+    assert "EXISTS (SELECT repos.id" not in sql
+
+
+@pytest.mark.unit
+def test_branch_filter_nested_in_or_still_suppresses_default_conjunct() -> None:
+    sql, _params = _render("foo OR branch:main")
+    assert "files.branches @>" in sql
+    assert "EXISTS (SELECT repos.id" not in sql
+
+
 # --------------------------------------------------------------------- boolean shapes
 
 
@@ -247,7 +288,7 @@ def test_projection_and_ordering() -> None:
     sql, _ = _render("foo")
     assert "SELECT files.id, files.repo_id, files.path, files.lang" in sql
     assert "files.content" not in sql.split("WHERE")[0]  # content only in predicate
-    assert "ORDER BY files.repo_id, files.path" in sql
+    assert "ORDER BY files.repo_id, files.path, files.content_sha" in sql
 
 
 # ------------------------------------------------------------------------- edge atoms

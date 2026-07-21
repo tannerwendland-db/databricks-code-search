@@ -83,6 +83,7 @@ from app.db.models import File
 from app.query.compiler import DEFAULT_ROW_LIMIT, compile_query
 from app.query.parser import (
     And,
+    BranchFilter,
     LangFilter,
     Node,
     Or,
@@ -122,6 +123,8 @@ class FileMatches:
     repo_id: int
     path: str
     lang: str | None
+    content_sha: str
+    branches: tuple[str, ...]
     line_matches: tuple[LineMatch, ...]  # non-empty
 
 
@@ -151,7 +154,7 @@ class GrepResult:
       exactly that case.
     """
 
-    files: tuple[FileMatches, ...]  # in (repo_id, path) order
+    files: tuple[FileMatches, ...]  # in (repo_id, path, content_sha) order
     truncated: bool  # byte cap OR row cap tripped
     truncation_reason: str | None  # "byte_cap" | "row_cap" | None
     regex_incompatible: bool  # some Regex atom failed Python re.compile
@@ -183,7 +186,7 @@ def _collect_matchers(node: Node, flags: int, patterns: list[re.Pattern[str]]) -
             for child in children:
                 incompatible = _collect_matchers(child, flags, patterns) or incompatible
             return incompatible
-        case RepoFilter() | PathFilter() | LangFilter() | SymbolFilter():
+        case RepoFilter() | PathFilter() | LangFilter() | SymbolFilter() | BranchFilter():
             return False
         case _:
             assert_never(node)
@@ -386,9 +389,17 @@ def grep_search(
             )
 
         content_stmt = (
-            select(File.id, File.repo_id, File.path, File.lang, File.content)
+            select(
+                File.id,
+                File.repo_id,
+                File.path,
+                File.lang,
+                File.content_sha,
+                File.branches,
+                File.content,
+            )
             .where(File.id.in_(ids))
-            .order_by(File.repo_id, File.path)
+            .order_by(File.repo_id, File.path, File.content_sha)
             .execution_options(yield_per=1)  # one-row server-side cursor; NOT bare stream_results
         )
         running = 0
@@ -405,7 +416,16 @@ def grep_search(
                 running += len(content.encode("utf-8"))
                 line_matches = extract_line_matches(content, patterns)
                 if line_matches:
-                    files.append(FileMatches(row.repo_id, row.path, row.lang, tuple(line_matches)))
+                    files.append(
+                        FileMatches(
+                            row.repo_id,
+                            row.path,
+                            row.lang,
+                            row.content_sha,
+                            tuple(row.branches),
+                            tuple(line_matches),
+                        )
+                    )
         except OperationalError as error:
             reraise_or_query_too_broad(error)
         finally:

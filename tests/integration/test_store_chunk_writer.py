@@ -95,7 +95,7 @@ UTIL = ("util.py", "def g():\n    return 2\n", [ExtractedSymbol("g", "function",
 def test_chunk_writer_none_is_byte_identical_to_the_core_path(conn: Connection) -> None:
     items = [(_pf(path, content), syms) for path, content, syms in (MAIN, UTIL)]
     counts = index_repo(
-        conn, name="acme/widgets", default_branch="main", head_sha="sha_first", items=items
+        conn, name="acme/widgets", branch="main", is_default=True, head_sha="sha_first", items=items
     )
     assert counts == IndexCounts(files=2, symbols=2, swept=0)
     assert _count(conn, "files") == 2
@@ -109,7 +109,8 @@ def test_chunk_writer_writes_inside_the_transaction(conn: Connection) -> None:
     counts = index_repo(
         conn,
         name="acme/widgets",
-        default_branch="main",
+        branch="main",
+        is_default=True,
         head_sha="sha_first",
         items=items,
         chunk_writer=_stub_chunk_writer,
@@ -127,7 +128,8 @@ def test_reindex_is_idempotent_for_chunks(conn: Connection) -> None:
     index_repo(
         conn,
         name="acme/widgets",
-        default_branch="main",
+        branch="main",
+        is_default=True,
         head_sha="sha_first",
         items=items,
         chunk_writer=_stub_chunk_writer,
@@ -136,7 +138,8 @@ def test_reindex_is_idempotent_for_chunks(conn: Connection) -> None:
     counts = index_repo(
         conn,
         name="acme/widgets",
-        default_branch="main",
+        branch="main",
+        is_default=True,
         head_sha="sha_first",
         items=items,
         chunk_writer=_stub_chunk_writer,
@@ -151,7 +154,8 @@ def test_chunks_cascade_delete_when_file_is_swept(conn: Connection) -> None:
     index_repo(
         conn,
         name="acme/widgets",
-        default_branch="main",
+        branch="main",
+        is_default=True,
         head_sha="sha_first",
         items=items,
         chunk_writer=_stub_chunk_writer,
@@ -165,7 +169,8 @@ def test_chunks_cascade_delete_when_file_is_swept(conn: Connection) -> None:
     counts = index_repo(
         conn,
         name="acme/widgets",
-        default_branch="main",
+        branch="main",
+        is_default=True,
         head_sha="sha_second",
         items=main_only,
         chunk_writer=_stub_chunk_writer,

@@ -34,7 +34,14 @@ class _FakeResult:
 
 
 class _FakeConn:
-    """Just enough of sqlalchemy.Connection for index_repo's fixed statement shape."""
+    """Just enough of sqlalchemy.Connection for index_repo's fixed statement shape.
+
+    Multi-branch (0003+): statement 1 (repos) now RETURNING just ``id``;
+    statement 2 (repo_branches) is the new per-branch CAS baseline; the
+    membership sweep is raw ``text()`` SQL (an UPDATE then a DELETE against
+    ``files``, matched by substring since a ``TextClause`` has no ``.table``);
+    the final CAS stamp UPDATE targets ``repo_branches``, not ``repos``.
+    """
 
     def __init__(self, *, stamp_rowcount: int = 1) -> None:
         self._next_file_id = 1
@@ -44,10 +51,20 @@ class _FakeConn:
         return contextlib.nullcontext()
 
     def execute(self, stmt: Any, params: Any = None) -> _FakeResult:
+        text = getattr(stmt, "text", None)
+        if text is not None:
+            if "UPDATE files SET branches" in text:
+                return _FakeResult(rowcount=0)
+            if "DELETE FROM files" in text:
+                return _FakeResult(rowcount=0)
+            raise AssertionError(f"unexpected text() statement: {text!r}")
+
         table = stmt.table.name
         if isinstance(stmt, Insert) and table == "repos":
-            # (id, last_indexed_commit, index_semantics_version) -- new-repo shape.
-            return _FakeResult(row=(1, None, None))
+            return _FakeResult(scalar=1)
+        if isinstance(stmt, Insert) and table == "repo_branches":
+            # (last_indexed_commit, index_semantics_version) -- new-branch shape.
+            return _FakeResult(row=(None, None))
         if isinstance(stmt, Insert) and table == "files":
             file_id = self._next_file_id
             self._next_file_id += 1
@@ -56,9 +73,7 @@ class _FakeConn:
             return _FakeResult()
         if isinstance(stmt, Delete) and table == "symbols":
             return _FakeResult()
-        if isinstance(stmt, Delete) and table == "files":
-            return _FakeResult(rowcount=0)
-        if isinstance(stmt, Update) and table == "repos":
+        if isinstance(stmt, Update) and table == "repo_branches":
             return _FakeResult(rowcount=self._stamp_rowcount)
         raise AssertionError(f"unexpected statement against {table!r}: {stmt}")
 
@@ -71,7 +86,12 @@ def _pf(path: str, content: str) -> ParsedFile:
 def test_chunk_writer_defaults_to_none_and_behavior_is_unchanged() -> None:
     items = [(_pf("a.py", "x = 1\n"), [ExtractedSymbol("x", "variable", 1, 1)])]
     counts = index_repo(
-        _FakeConn(), name="acme/widgets", default_branch="main", head_sha="sha1", items=items
+        _FakeConn(),
+        name="acme/widgets",
+        branch="main",
+        is_default=True,
+        head_sha="sha1",
+        items=items,
     )
     assert counts == IndexCounts(files=1, symbols=1, swept=0)
 
@@ -90,7 +110,8 @@ def test_chunk_writer_is_called_once_per_file_with_repo_id_and_file_id() -> None
     index_repo(
         _FakeConn(),
         name="acme/widgets",
-        default_branch="main",
+        branch="main",
+        is_default=True,
         head_sha="sha1",
         items=items,
         chunk_writer=chunk_writer,
@@ -107,7 +128,8 @@ def test_no_chunk_writer_means_no_extra_calls() -> None:
     index_repo(
         _FakeConn(),
         name="acme/widgets",
-        default_branch="main",
+        branch="main",
+        is_default=True,
         head_sha="sha1",
         items=items,
         chunk_writer=None,
@@ -116,14 +138,15 @@ def test_no_chunk_writer_means_no_extra_calls() -> None:
 
 @pytest.mark.unit
 def test_stamp_matching_no_row_raises_stale_index_error() -> None:
-    # The CAS UPDATE matching zero rows means the repos row moved out from under
-    # the statement-1 baseline; index_repo must abort rather than stamp.
+    # The CAS UPDATE matching zero rows means the repo_branches row moved out
+    # from under the statement-2 baseline; index_repo must abort rather than stamp.
     items = [(_pf("a.py", "x = 1\n"), [])]
     with pytest.raises(StaleIndexError, match="acme/widgets"):
         index_repo(
             _FakeConn(stamp_rowcount=0),
             name="acme/widgets",
-            default_branch="main",
+            branch="main",
+            is_default=True,
             head_sha="sha1",
             items=items,
         )

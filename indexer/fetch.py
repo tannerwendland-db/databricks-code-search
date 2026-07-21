@@ -14,6 +14,7 @@ import tarfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -107,14 +108,16 @@ def _has_next_page(link_header: str | None) -> bool:
     return False
 
 
-def _list_repos(client: httpx.Client, url: str, *, selector: str) -> list[RepoMeta]:
-    """Page through a GitHub list-repos endpoint, following ``Link`` rel=next.
+def _paginated_get(client: httpx.Client, url: str, *, selector: str) -> list[dict[str, Any]]:
+    """Page through a GitHub list endpoint, following ``Link`` rel=next.
 
-    ``selector`` is the org/user name being enumerated; it is named in every
-    :class:`RateLimitError` so a quota failure points at its own cause. Request
-    headers are never logged (token-redaction invariant).
+    Item-shape-agnostic: returns raw decoded JSON objects, one list per page
+    concatenated. ``selector`` names what is being paged (an org/user, or an
+    ``org/repo`` for a branch listing) in every :class:`RateLimitError` and the
+    completion log line, so a quota failure or a rate-limit record points at its
+    own cause. Request headers are never logged (token-redaction invariant).
     """
-    repos: list[RepoMeta] = []
+    items: list[dict[str, object]] = []
     page = 1
     remaining: str | None = None
 
@@ -133,27 +136,32 @@ def _list_repos(client: httpx.Client, url: str, *, selector: str) -> list[RepoMe
         response.raise_for_status()
 
         remaining = response.headers.get("X-RateLimit-Remaining")
-        repos.extend(
-            RepoMeta(
-                full_name=str(item["full_name"]),
-                fork=bool(item["fork"]),
-                archived=bool(item["archived"]),
-                size_kb=int(item["size"]),
-            )
-            for item in response.json()
-        )
+        items.extend(response.json())
 
         if not _has_next_page(response.headers.get("Link")):
             break
         page += 1
 
     logger.info(
-        "enumerated %d repos for %s; GitHub rate limit remaining: %s",
-        len(repos),
+        "enumerated %d for %s; GitHub rate limit remaining: %s",
+        len(items),
         selector,
         remaining if remaining is not None else "unknown",
     )
-    return repos
+    return items
+
+
+def _list_repos(client: httpx.Client, url: str, *, selector: str) -> list[RepoMeta]:
+    """Page through a GitHub list-repos endpoint, following ``Link`` rel=next."""
+    return [
+        RepoMeta(
+            full_name=str(item["full_name"]),
+            fork=bool(item["fork"]),
+            archived=bool(item["archived"]),
+            size_kb=int(item["size"]),
+        )
+        for item in _paginated_get(client, url, selector=selector)
+    ]
 
 
 def list_org_repos(client: httpx.Client, org: str) -> list[RepoMeta]:
@@ -166,22 +174,41 @@ def list_user_repos(client: httpx.Client, user: str) -> list[RepoMeta]:
     return _list_repos(client, f"{_API_BASE}/users/{user}/repos", selector=user)
 
 
+def list_branches(client: httpx.Client, org: str, repo: str) -> list[str]:
+    """Every branch name for ``org/repo``, paginated the same way as list-repos.
+
+    Used only when a connection configures ``branches:`` globs (plan Phase 2):
+    resolving glob patterns needs the repo's real branch list to match against.
+    """
+    items = _paginated_get(
+        client, f"{_API_BASE}/repos/{org}/{repo}/branches", selector=f"{org}/{repo} branches"
+    )
+    return [str(item["name"]) for item in items]
+
+
+def resolve_branch_head(client: httpx.Client, org: str, repo: str, branch: str) -> str:
+    """The immutable HEAD SHA of ``branch``.
+
+    The tarball is always downloaded by this SHA, never by the branch name.
+    """
+    commit = client.get(
+        f"{_API_BASE}/repos/{org}/{repo}/commits/{branch}",
+        headers=_GITHUB_HEADERS,
+    )
+    commit.raise_for_status()
+    return str(commit.json()["sha"])
+
+
 def resolve_ref(client: httpx.Client, org: str, repo: str) -> tuple[str, str]:
     """Return ``(default_branch, head_sha)`` for ``org/repo``.
 
-    Two calls: the repo metadata for the default branch, then that branch's HEAD
-    commit for the immutable SHA the tarball is downloaded by.
+    Two calls: the repo metadata for the default branch, then
+    :func:`resolve_branch_head` for that branch's immutable HEAD SHA.
     """
     meta = client.get(f"{_API_BASE}/repos/{org}/{repo}", headers=_GITHUB_HEADERS)
     meta.raise_for_status()
     default_branch = str(meta.json()["default_branch"])
-
-    commit = client.get(
-        f"{_API_BASE}/repos/{org}/{repo}/commits/{default_branch}",
-        headers=_GITHUB_HEADERS,
-    )
-    commit.raise_for_status()
-    head_sha = str(commit.json()["sha"])
+    head_sha = resolve_branch_head(client, org, repo, default_branch)
     return default_branch, head_sha
 
 

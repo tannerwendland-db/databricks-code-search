@@ -18,8 +18,10 @@ from indexer.fetch import (
     assert_disk_headroom,
     download_tarball,
     extract_tarball,
+    list_branches,
     list_org_repos,
     list_user_repos,
+    resolve_branch_head,
     resolve_ref,
 )
 
@@ -70,6 +72,17 @@ def _client() -> httpx.Client:
 def test_resolve_ref_returns_branch_and_sha() -> None:
     with _client() as client:
         assert resolve_ref(client, ORG, REPO) == (BRANCH, SHA)
+
+
+@pytest.mark.unit
+def test_resolve_branch_head_returns_the_commits_sha() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == f"/repos/{ORG}/{REPO}/commits/feature/x":
+            return httpx.Response(200, json={"sha": "feature_sha"})
+        return httpx.Response(404)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert resolve_branch_head(client, ORG, REPO, "feature/x") == "feature_sha"
 
 
 @pytest.mark.unit
@@ -265,6 +278,52 @@ def test_repo_meta_maps_github_fields() -> None:
         repos = list_org_repos(client, ORG)
 
     assert repos == [RepoMeta(full_name="acme/widgets", fork=True, archived=True, size_kb=1234)]
+
+
+@pytest.mark.unit
+def test_list_branches_hits_branches_endpoint_with_pagination_params() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"name": "main"}, {"name": "dev"}])
+
+    client, seen = _recording_client(handler)
+    with client:
+        branches = list_branches(client, ORG, REPO)
+
+    assert branches == ["main", "dev"]
+    assert len(seen) == 1
+    assert seen[0].url.path == f"/repos/{ORG}/{REPO}/branches"
+    assert seen[0].url.params["per_page"] == "100"
+    assert seen[0].url.params["page"] == "1"
+
+
+@pytest.mark.unit
+def test_list_branches_follows_link_rel_next() -> None:
+    page1 = [{"name": f"b{i}"} for i in range(100)]
+    page2 = [{"name": f"b{i}"} for i in range(100, 120)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["page"] == "1":
+            return httpx.Response(
+                200,
+                json=page1,
+                headers={"Link": f'<{request.url}&page=2>; rel="next"'},
+            )
+        return httpx.Response(200, json=page2)
+
+    client, seen = _recording_client(handler)
+    with client:
+        branches = list_branches(client, ORG, REPO)
+
+    assert len(branches) == 120
+    assert len(seen) == 2
+
+
+@pytest.mark.unit
+def test_list_branches_rate_limit_names_org_repo_selector() -> None:
+    client, _ = _recording_client(lambda request: httpx.Response(429))
+    with client:
+        with pytest.raises(RateLimitError, match=f"{ORG}/{REPO} branches"):
+            list_branches(client, ORG, REPO)
 
 
 @pytest.mark.unit

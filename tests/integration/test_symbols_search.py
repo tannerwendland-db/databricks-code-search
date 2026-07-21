@@ -24,6 +24,7 @@ from app.db.client import create_db_engine
 from app.db.models import Base, File, Repo, Symbol
 from app.search.errors import QueryTooBroadError
 from app.search.symbols import SymbolResult, symbol_search
+from indexer.hashing import content_sha
 
 SCHEMA_PREFIX = "test_symsearch"
 
@@ -39,16 +40,33 @@ def _unique(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def _insert_repo(conn: Connection, name: str) -> int:
-    return conn.execute(insert(Repo).values(name=name).returning(Repo.id)).scalar_one()
+def _insert_repo(conn: Connection, name: str, *, default_branch: str | None = "main") -> int:
+    return conn.execute(
+        insert(Repo).values(name=name, default_branch=default_branch).returning(Repo.id)
+    ).scalar_one()
 
 
 def _insert_file(
-    conn: Connection, repo_id: int, path: str, *, lang: str | None, content: str | None
+    conn: Connection,
+    repo_id: int,
+    path: str,
+    *,
+    lang: str | None,
+    content: str | None,
+    branches: list[str] | None = None,
 ) -> int:
+    # branches defaults to ["main"], matching _insert_repo's default_branch="main" -- every
+    # existing (pre-0003) test keeps seeing its files via the implicit default-branch conjunct.
     return conn.execute(
         insert(File)
-        .values(repo_id=repo_id, path=path, lang=lang, content=content)
+        .values(
+            repo_id=repo_id,
+            path=path,
+            lang=lang,
+            content=content,
+            content_sha=content_sha(content),
+            branches=branches if branches is not None else ["main"],
+        )
         .returning(File.id)
     ).scalar_one()
 
@@ -276,6 +294,74 @@ def test_tiny_statement_timeout_raises_query_too_broad(seeded: Seeded) -> None:
     seeded.conn.commit()
     with pytest.raises(QueryTooBroadError):
         _search(seeded.conn, "sym:blobsym /zq/", statement_timeout_ms=1)
+
+
+# ------------------------------------------------------------------- branch scoping (0003)
+
+
+@pytest.mark.integration
+def test_default_query_excludes_feature_only_symbol(seeded: Seeded) -> None:
+    # Two content versions of the same path: "main" (default) declares FeatureFn, "feature"
+    # declares a DIFFERENT symbol under the same name's file. No branch: -> default conjunct
+    # only ever sees the "main" content version's symbols.
+    main_fid = _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="func Shared() {}\n",
+        branches=["main"],
+    )
+    _insert_symbol(seeded.conn, main_fid, seeded.acme_id, "Shared", start_line=1)
+    feature_fid = _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="func Shared() {}\nfunc FeatureOnly() {}\n",
+        branches=["feature"],
+    )
+    _insert_symbol(seeded.conn, feature_fid, seeded.acme_id, "Shared", start_line=1)
+    _insert_symbol(seeded.conn, feature_fid, seeded.acme_id, "FeatureOnly", start_line=2)
+    seeded.conn.commit()
+
+    default_result = _search(seeded.conn, "sym:FeatureOnly")
+    assert default_result.symbols == ()  # only reachable on "feature"
+
+    shared_default = _search(seeded.conn, "sym:Shared")
+    shared_paths = {
+        (sm.path, sm.branches) for sm in shared_default.symbols if sm.path == "src/multi.go"
+    }
+    assert shared_paths == {("src/multi.go", ("main",))}
+
+
+@pytest.mark.integration
+def test_branch_filter_reaches_feature_only_symbol(seeded: Seeded) -> None:
+    main_fid = _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="func Shared() {}\n",
+        branches=["main"],
+    )
+    _insert_symbol(seeded.conn, main_fid, seeded.acme_id, "Shared", start_line=1)
+    feature_fid = _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="func Shared() {}\nfunc FeatureOnly() {}\n",
+        branches=["feature"],
+    )
+    _insert_symbol(seeded.conn, feature_fid, seeded.acme_id, "Shared", start_line=1)
+    _insert_symbol(seeded.conn, feature_fid, seeded.acme_id, "FeatureOnly", start_line=2)
+    seeded.conn.commit()
+
+    result = _search(seeded.conn, "branch:feature sym:FeatureOnly")
+    (sym,) = result.symbols
+    assert sym.path == "src/multi.go"
+    assert sym.branches == ("feature",)
 
 
 @pytest.mark.integration

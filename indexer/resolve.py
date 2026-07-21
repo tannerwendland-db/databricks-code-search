@@ -1,10 +1,11 @@
-"""Resolve a :class:`~indexer.repo_config.RepoConfig` into canonical ``org/repo`` names.
+"""Resolve a :class:`~indexer.repo_config.RepoConfig` into :class:`RepoEntry` values.
 
 Enumerate every ``orgs``/``users`` selector, filter the *enumerated* set through
 that connection's ``ExcludeRules``, add explicit ``repos`` entries **unfiltered**
-(explicit always wins), dedup across connections in first-seen order, and
-fail-fast on an empty or oversized result -- all before the job downloads a
-single tarball.
+(explicit always wins), dedup across connections in first-seen order (unioning
+each connection's ``branches:`` globs onto the surviving entry), and fail-fast
+on an empty or oversized result -- all before the job downloads a single
+tarball.
 
 ``normalize_repo`` is imported from :mod:`indexer.repo_config`, never from
 :mod:`indexer.job`: ``indexer.job`` imports :func:`resolve_repos` from here, so
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 
 import httpx
@@ -39,6 +41,22 @@ _MAX_LOGGED_NAMES = 50
 
 # Test seam only -- NOT a provider-dispatch point (see module docstring).
 Enumerator = Callable[[httpx.Client, str], list[RepoMeta]]
+
+
+@dataclass(frozen=True)
+class RepoEntry:
+    """A resolved repo plus the union of every connection's branch globs that named it.
+
+    Empty ``branch_globs`` means default-branch-only -- no connection that
+    resolved this repo configured ``branches:`` (``indexer.repo_config``'s
+    documented default). When a repo is named by more than one connection with
+    different ``branches:`` lists, the globs are UNIONED: the repo is indexed
+    once per run, so its glob set must reflect everything any connection asked
+    for, not just whichever connection happened to resolve it first.
+    """
+
+    name: str
+    branch_globs: frozenset[str]
 
 
 class EmptyConfigError(Exception):
@@ -85,8 +103,8 @@ def resolve_repos(
     org_enumerator: Enumerator = list_org_repos,
     user_enumerator: Enumerator = list_user_repos,
     max_repos: int = MAX_REPOS,
-) -> list[str]:
-    """Resolve ``config`` into a deduped, ordered list of canonical ``org/repo``.
+) -> list[RepoEntry]:
+    """Resolve ``config`` into a deduped, ordered list of :class:`RepoEntry`.
 
     Enumeration exceptions propagate untouched -- nothing has been indexed yet,
     and Principle 3 says fail loudly before touching anything.
@@ -98,6 +116,10 @@ def resolve_repos(
     """
     resolved: list[str] = []
     seen: set[str] = set()
+    # Per dedup key: the union of every connection's branch globs that named
+    # this repo. A later connection naming an already-resolved repo still
+    # contributes its globs even though the NAME's first-seen spelling wins.
+    globs_by_key: dict[str, set[str]] = {}
     total_enumerated = 0
     # (index, enumerated, retained, explicit, tallies) per connection.
     summaries: list[tuple[int, int, int, int, dict[str, int]]] = []
@@ -131,10 +153,14 @@ def resolve_repos(
             # (`IceRhymers/MyRepo`) are the same repo; keying on the raw string
             # would index it twice and duplicate every one of its search hits.
             key = name.casefold()
-            if key in seen:
-                continue
-            seen.add(key)
-            resolved.append(name)
+            if key not in seen:
+                seen.add(key)
+                resolved.append(name)
+                globs_by_key[key] = set()
+            # Union this connection's globs regardless of whether the name was
+            # already seen: two connections naming the same repo with different
+            # branches: lists must both apply, not just whichever ran first.
+            globs_by_key[key].update(connection.branches)
 
         total_enumerated += len(enumerated)
         summaries.append((index, len(enumerated), len(retained), len(explicit), tallies))
@@ -183,4 +209,7 @@ def resolve_repos(
         connection_word,
     )
     logger.info("resolved repos: %s", _format_names(resolved))
-    return resolved
+    return [
+        RepoEntry(name=name, branch_globs=frozenset(globs_by_key[name.casefold()]))
+        for name in resolved
+    ]

@@ -86,6 +86,14 @@ class SymbolFilter:
 
 
 @dataclass(frozen=True)
+class BranchFilter:
+    """``branch:<value>`` -- restrict to files whose ``branches`` membership includes
+    ``value`` (exact match, opaque here -- #9 lowers it to a GIN-served ``@>``)."""
+
+    value: str
+
+
+@dataclass(frozen=True)
 class And:
     """N-ary conjunction. Invariant: ``len(children) >= 2``."""
 
@@ -100,7 +108,17 @@ class Or:
 
 
 # A plain union alias -- no common base class -- so #9 gets match/exhaustiveness.
-Node: TypeAlias = Substring | Regex | RepoFilter | PathFilter | LangFilter | SymbolFilter | And | Or
+Node: TypeAlias = (
+    Substring
+    | Regex
+    | RepoFilter
+    | PathFilter
+    | LangFilter
+    | SymbolFilter
+    | BranchFilter
+    | And
+    | Or
+)
 
 
 # ------------------------------------------------------------------------- errors
@@ -129,6 +147,7 @@ class TokenKind(Enum):
     PATH = auto()
     LANG = auto()
     SYMBOL = auto()
+    BRANCH = auto()
     CASE = auto()  # value is "yes" or "no"; a zero-real-term operand (query-global flag)
 
 
@@ -145,13 +164,14 @@ class Token:
 
 _WHITESPACE = frozenset(" \t\n")
 _BAREWORD_STOP = frozenset(" \t\n()")
-_SUPPORTED = frozenset({"repo", "file", "lang", "sym", "case"})
-_RESERVED = frozenset({"content", "branch", "r", "f", "l", "b", "c", "s"})
+_SUPPORTED = frozenset({"repo", "file", "lang", "sym", "case", "branch"})
+_RESERVED = frozenset({"content", "r", "f", "l", "b", "c", "s"})
 _FIELD_KINDS: dict[str, TokenKind] = {
     "repo": TokenKind.REPO,
     "file": TokenKind.PATH,
     "lang": TokenKind.LANG,
     "sym": TokenKind.SYMBOL,
+    "branch": TokenKind.BRANCH,
 }
 
 _MAX_DEPTH = 200
@@ -397,6 +417,8 @@ class _Parser:
             return LangFilter(tok.value)
         if kind == TokenKind.SYMBOL:
             return SymbolFilter(tok.value)
+        if kind == TokenKind.BRANCH:
+            return BranchFilter(tok.value)
         # kind == TokenKind.CASE
         return _CASE_MARKER
 

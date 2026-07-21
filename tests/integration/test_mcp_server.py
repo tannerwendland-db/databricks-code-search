@@ -1,8 +1,7 @@
 """End-to-end tests for the FastMCP server over streamable HTTP (issue #11).
 
-Requires a running Postgres with the standard PG* env set. As with ``test_grep.py``, in this
-repo that Postgres exists only as CI's service container, so these tests are CI-only and were
-validated locally by lint/type-check + ``--collect-only``, not execution.
+Requires a running Postgres with the standard PG* env set (CI's service container, or a local
+Postgres for `make test-integration`).
 
 Two seams are load-bearing (both proven in review):
 
@@ -38,7 +37,8 @@ from sqlalchemy import insert, text
 
 from app import main
 from app.db.client import create_db_engine
-from app.db.models import Base, File, Repo, Symbol
+from app.db.models import Base, File, Repo, RepoBranch, Symbol
+from indexer.hashing import content_sha
 
 SCHEMA_PREFIX = "test_mcp"
 BASE_URL = "http://localhost:8000"  # port-bearing: clears FastMCP DNS-rebinding protection
@@ -77,7 +77,20 @@ def _restore_pgoptions(prev: str | None) -> None:
 
 @pytest.fixture
 def seeded_schema() -> Iterator[str]:
-    """Throwaway schema + durable-core DDL + the deterministic grep corpus, PGOPTIONS-visible."""
+    """Throwaway schema + durable-core DDL + the deterministic grep corpus, PGOPTIONS-visible.
+
+    Multi-branch (0003) additions over the base corpus:
+
+    * ``acme/widgets`` also carries a ``feature/x`` content version of ``src/handler.go`` with
+      DIVERGENT content (a different ``content_sha``, so it is a separate row per the
+      ``(repo_id, path, content_sha)`` unique constraint) -- exercises ``branch:``/``branch``
+      filtering and ``get_file(branch=)`` disambiguation.
+    * ``repo_branches`` rows for both ``acme/widgets`` branches (but deliberately NONE for
+      ``beta/tools``, which keeps the legacy "no repo_branches row" fallback path covered).
+    * ``gamma/nullbranch`` has ``default_branch IS NULL`` with one file on ``branches=["HEAD"]``
+      -- the NULL-default ``coalesce(...,'HEAD')`` reachability golden case (pre-mortem #3),
+      exercised identically at the query-compiler/semantic/``get_file`` sites elsewhere.
+    """
     schema = _unique(SCHEMA_PREFIX)
     admin_engine = create_db_engine()
     conn = admin_engine.connect()
@@ -98,13 +111,20 @@ def seeded_schema() -> Iterator[str]:
             .returning(Repo.id)
         ).scalar_one()
         conn.execute(insert(Repo).values(name="beta/tools", default_branch="main"))
+        gamma_id = conn.execute(
+            insert(Repo).values(name="gamma/nullbranch", default_branch=None).returning(Repo.id)
+        ).scalar_one()
+
+        handler_content = "package main\nfunc Handler() {}\n// foo lives here and foo again\n"
         handler_file_id = conn.execute(
             insert(File)
             .values(
                 repo_id=acme_id,
                 path="src/handler.go",
                 lang="go",
-                content="package main\nfunc Handler() {}\n// foo lives here and foo again\n",
+                content=handler_content,
+                content_sha=content_sha(handler_content),
+                branches=["main"],
             )
             .returning(File.id)
         ).scalar_one()
@@ -118,6 +138,41 @@ def seeded_schema() -> Iterator[str]:
                 start_line=2,
             )
         )
+
+        # A DIVERGENT content version of the SAME path on a non-default branch.
+        feature_content = "package main\nfunc Handler() {}\n// updated on feature/x\n"
+        conn.execute(
+            insert(File).values(
+                repo_id=acme_id,
+                path="src/handler.go",
+                lang="go",
+                content=feature_content,
+                content_sha=content_sha(feature_content),
+                branches=["feature/x"],
+            )
+        )
+
+        conn.execute(
+            insert(RepoBranch).values(repo_id=acme_id, branch="main", last_indexed_commit="abc123")
+        )
+        conn.execute(
+            insert(RepoBranch).values(
+                repo_id=acme_id, branch="feature/x", last_indexed_commit="feat456"
+            )
+        )
+
+        gamma_content = "print('head only')\n"
+        conn.execute(
+            insert(File).values(
+                repo_id=gamma_id,
+                path="main.py",
+                lang="python",
+                content=gamma_content,
+                content_sha=content_sha(gamma_content),
+                branches=["HEAD"],
+            )
+        )
+        conn.execute(insert(RepoBranch).values(repo_id=gamma_id, branch="HEAD"))
         conn.commit()
 
         # Point the server engine at this schema BEFORE it is built, and reset the singleton.
@@ -212,10 +267,12 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 assert sem["count"] == 0
 
                 search = _tool_json(await session.call_tool("search_code", {"query": "foo"}))
+                # Default-branch scoping (0003): "foo" is only in the "main" content version,
+                # so the feature/x divergent version never surfaces without an explicit branch.
                 assert search["file_count"] == 1
                 assert search["files"][0]["file"] == "src/handler.go"
                 assert search["files"][0]["repo"] == "acme/widgets"
-                assert search["files"][0]["branches"] == ["HEAD"]
+                assert search["files"][0]["branches"] == ["main"]  # real membership, not "HEAD"
                 (m,) = search["files"][0]["matches"]
                 assert m["line"] == 3
                 for start, end in m["byte_ranges"]:
@@ -244,8 +301,21 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 assert sm["symbols"] == [{"name": "Handler", "kind": "function"}]
 
                 repos = _tool_json(await session.call_tool("list_repos", {}))
-                assert repos["count"] == 2
-                assert {r["name"] for r in repos["repos"]} == {"acme/widgets", "beta/tools"}
+                assert repos["count"] == 3
+                assert {r["name"] for r in repos["repos"]} == {
+                    "acme/widgets",
+                    "beta/tools",
+                    "gamma/nullbranch",
+                }
+                acme_repo = next(r for r in repos["repos"] if r["name"] == "acme/widgets")
+                # list_repos now reflects repo_branches (0003): real per-branch enumeration,
+                # not a guess from the single default_branch stamp.
+                assert set(acme_repo["branches"]) == {"main", "feature/x"}
+                assert acme_repo["default_branch"] == "main"
+                assert acme_repo["last_indexed_commit"] == "abc123"  # the DEFAULT branch's stamp
+                # beta/tools has NO repo_branches rows (legacy-fallback coverage).
+                beta_repo = next(r for r in repos["repos"] if r["name"] == "beta/tools")
+                assert beta_repo["branches"] == ["HEAD"]
 
                 hit = _tool_json(
                     await session.call_tool(
@@ -254,6 +324,9 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 )
                 assert hit["found"] is True
                 assert "func Handler()" in hit["content"]
+                # Default resolution now returns the REAL branch, not the hardcoded "HEAD".
+                assert hit["branch"] == "main"
+                assert "foo" in hit["content"]
 
                 miss = _tool_json(
                     await session.call_tool(
@@ -262,6 +335,51 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 )
                 assert miss["found"] is False
                 assert miss["content"] is None
+
+                # branch: filtering (0003) -- both the `branch` param and the raw `branch:`
+                # query atom must surface the feature/x-only content version.
+                feature_search = _tool_json(
+                    await session.call_tool(
+                        "search_code", {"query": "Handler", "branch": "feature/x"}
+                    )
+                )
+                assert feature_search["file_count"] == 1
+                assert feature_search["files"][0]["branches"] == ["feature/x"]
+
+                feature_search_atom = _tool_json(
+                    await session.call_tool("search_code", {"query": 'Handler branch:"feature/x"'})
+                )
+                assert feature_search_atom["file_count"] == 1
+                assert feature_search_atom["files"][0]["branches"] == ["feature/x"]
+
+                # get_file(branch=) disambiguates the two divergent content versions of the
+                # SAME path -- proves the predicate stays single-row (scalar_one_or_none never
+                # raises MultipleResultsFound) even though `files` now has two rows for this path.
+                feature_file = _tool_json(
+                    await session.call_tool(
+                        "get_file",
+                        {
+                            "repo": "acme/widgets",
+                            "path": "src/handler.go",
+                            "branch": "feature/x",
+                        },
+                    )
+                )
+                assert feature_file["found"] is True
+                assert feature_file["branch"] == "feature/x"
+                assert "updated on feature/x" in feature_file["content"]
+                assert "foo" not in feature_file["content"]
+
+                # NULL default_branch reachability (pre-mortem #3): coalesce(...,'HEAD')
+                # resolves the same way here as at the compiler/semantic/backfill sites.
+                null_default_file = _tool_json(
+                    await session.call_tool(
+                        "get_file", {"repo": "gamma/nullbranch", "path": "main.py"}
+                    )
+                )
+                assert null_default_file["found"] is True
+                assert null_default_file["branch"] == "HEAD"
+                assert "head only" in null_default_file["content"]
 
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=BASE_URL

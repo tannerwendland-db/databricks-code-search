@@ -15,7 +15,7 @@ import pytest
 
 from indexer.fetch import RepoMeta
 from indexer.repo_config import RepoConfig
-from indexer.resolve import EmptyConfigError, RepoCeilingError, resolve_repos
+from indexer.resolve import EmptyConfigError, RepoCeilingError, RepoEntry, resolve_repos
 
 _NO_CLIENT = cast(httpx.Client, None)
 
@@ -44,8 +44,15 @@ class _Enumerator:
         return self.results.get(selector, [])
 
 
-def _resolve(config: RepoConfig, *, orgs: _Enumerator, users: _Enumerator, **kw: Any) -> list[str]:
+def _resolve_entries(
+    config: RepoConfig, *, orgs: _Enumerator, users: _Enumerator, **kw: Any
+) -> list[RepoEntry]:
     return resolve_repos(config, _NO_CLIENT, org_enumerator=orgs, user_enumerator=users, **kw)
+
+
+def _resolve(config: RepoConfig, *, orgs: _Enumerator, users: _Enumerator, **kw: Any) -> list[str]:
+    """Just the resolved names, for the tests that don't care about branch_globs."""
+    return [e.name for e in _resolve_entries(config, orgs=orgs, users=users, **kw)]
 
 
 # --- AC 22-25: the four exclude rules, applied to enumerated repos ----------
@@ -294,3 +301,74 @@ def test_ceiling_is_checked_after_dedup() -> None:
         max_repos=10,
     )
     assert len(got) == 10
+
+
+# --- RepoEntry.branch_globs: default-empty, union across connections -------
+
+
+@pytest.mark.unit
+def test_no_branches_configured_yields_empty_globs() -> None:
+    """The documented default: no connection sets branches: -> default-branch-only."""
+    entries = _resolve_entries(
+        _config({"repos": ["acme/widgets"]}), orgs=_Enumerator(), users=_Enumerator()
+    )
+    assert entries == [RepoEntry(name="acme/widgets", branch_globs=frozenset())]
+
+
+@pytest.mark.unit
+def test_branches_globs_carried_onto_the_resolved_entry() -> None:
+    entries = _resolve_entries(
+        _config({"repos": ["acme/widgets"], "branches": ["release/*", "staging"]}),
+        orgs=_Enumerator(),
+        users=_Enumerator(),
+    )
+    assert entries == [
+        RepoEntry(name="acme/widgets", branch_globs=frozenset({"release/*", "staging"}))
+    ]
+
+
+@pytest.mark.unit
+def test_branch_globs_unioned_across_connections_naming_the_same_repo() -> None:
+    """Two connections naming the same repo with different branches: both apply."""
+    entries = _resolve_entries(
+        _config(
+            {"repos": ["acme/widgets"], "branches": ["release/*"]},
+            {"repos": ["acme/widgets"], "branches": ["staging"]},
+        ),
+        orgs=_Enumerator(),
+        users=_Enumerator(),
+    )
+    assert entries == [
+        RepoEntry(name="acme/widgets", branch_globs=frozenset({"release/*", "staging"}))
+    ]
+
+
+@pytest.mark.unit
+def test_branch_globs_unioned_even_when_second_connection_finds_it_via_enumeration() -> None:
+    """The union applies regardless of which connection resolved the repo first."""
+    orgs = _Enumerator({"acme": [_meta("acme/widgets")]})
+    entries = _resolve_entries(
+        _config(
+            {"repos": ["acme/widgets"], "branches": ["release/*"]},
+            {"orgs": ["acme"], "branches": ["staging"]},
+        ),
+        orgs=orgs,
+        users=_Enumerator(),
+    )
+    assert entries == [
+        RepoEntry(name="acme/widgets", branch_globs=frozenset({"release/*", "staging"}))
+    ]
+
+
+@pytest.mark.unit
+def test_branch_globs_are_independent_per_repo() -> None:
+    entries = _resolve_entries(
+        _config({"repos": ["acme/a"], "branches": ["release/*"]}, {"repos": ["acme/b"]}),
+        orgs=_Enumerator(),
+        users=_Enumerator(),
+    )
+    by_name = {e.name: e.branch_globs for e in entries}
+    assert by_name == {
+        "acme/a": frozenset({"release/*"}),
+        "acme/b": frozenset(),
+    }
