@@ -17,8 +17,8 @@ TARGET ?= dev
 PROFILE ?= DEFAULT
 export DATABRICKS_CONFIG_PROFILE := $(PROFILE)
 
-install: ## Install all dependencies (incl. dev group)
-	uv sync --all-groups
+install: ## Install all dependencies (incl. dev group and optional extras, e.g. webui's fastapi)
+	uv sync --all-groups --all-extras
 
 run: ## Run the MCP server locally (dual-mode: set PGHOST + PG* for local Postgres; binds DATABRICKS_APP_PORT or 8000)
 	uv run sh -c 'uvicorn app.main:app --host 0.0.0.0 --port $${DATABRICKS_APP_PORT:-8000}'
