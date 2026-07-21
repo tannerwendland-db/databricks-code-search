@@ -178,8 +178,8 @@ make webui-build   # cd webui/frontend && npm ci && npm run build
 ```
 
 Commit the resulting `webui/frontend/dist/` changes. `npm test` (vitest) is available via
-`make webui-test`, advisory only — it is not wired into `make test` / `make test-integration`
-and is not a repo gate.
+`make webui-test` and is enforced by CI's `webui` job (which runs `npm ci` first); it is not
+wired into `make test` / `make test-integration`.
 
 ## Packaging: the deploy-time wheel
 
