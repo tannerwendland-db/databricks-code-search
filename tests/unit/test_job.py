@@ -1077,7 +1077,7 @@ def _elapsed(caplog: pytest.LogCaptureFixture, pattern: str) -> float:
 
 # --- Step 5: per-repo log context -------------------------------------------
 # Via contextvars + a logging filter rather than hand-prefixing each call site,
-# so records from indexer.fetch / indexer.store / indexer.embed — which carry no
+# so records from indexer.fetch / indexer.store / app.embed — which carry no
 # repo name of their own and WILL interleave under fan-out — are covered too.
 
 

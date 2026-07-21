@@ -1,4 +1,4 @@
-"""Unit tests for indexer.embed: batching, retry, dim-mismatch, and the lazy SDK import.
+"""Unit tests for app.embed: batching, retry, dim-mismatch, and the lazy SDK import.
 
 Every test injects a fake ``client`` (standing in for a ``WorkspaceClient``), so
 ``databricks.sdk`` is never imported here -- the whole point of the seam.
@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from indexer.embed import (
+from app.embed import (
     EmbeddingCountMismatchError,
     EmbeddingDimMismatchError,
     databricks_embedder,

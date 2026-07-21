@@ -66,7 +66,7 @@ not be one.
 ## 2. Reading the logs
 
 Every record carries the repo it belongs to in brackets, including records from
-`indexer.fetch`, `indexer.store`, and `indexer.embed`, which have no repo name
+`indexer.fetch`, `indexer.store`, and `app.embed`, which have no repo name
 of their own. Records emitted outside a worker (config resolution, the drain
 loop, third-party libraries) carry `-`.
 

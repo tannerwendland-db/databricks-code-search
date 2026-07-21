@@ -82,7 +82,7 @@ def test_empty_chunks_only_deletes() -> None:
 @pytest.mark.unit
 def test_never_touches_an_embedder() -> None:
     # write_chunks receives precomputed vectors only (issue #14 A4): nothing in
-    # this module should reference indexer.embed at all.
+    # this module should reference app.embed at all.
     import indexer.chunk_store as chunk_store_module
 
     assert "embed" not in vars(chunk_store_module)
