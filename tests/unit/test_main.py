@@ -16,11 +16,11 @@ from typing import Any
 
 import pytest
 
-from app import main
+from app import main, service
 from app.config import Settings
 from app.query.parser import QueryParseError
 from app.search.errors import QueryTooBroadError
-from app.search.grep import FileMatches, GrepResult, LineMatch
+from app.search.grep import FileCursor, FileMatches, GrepResult, LineMatch
 from app.search.symbols import SymbolMatch, SymbolResult
 
 
@@ -99,6 +99,7 @@ def _grep(
     regex_incompatible: bool = False,
     no_content_atom: bool = False,
     zero_width_only_atoms: bool = False,
+    next_cursor: FileCursor | None = None,
 ) -> GrepResult:
     """Build a fake GrepResult, defaulting every field to its "nothing notable" value.
 
@@ -113,6 +114,7 @@ def _grep(
         regex_incompatible=regex_incompatible,
         no_content_atom=no_content_atom,
         zero_width_only_atoms=zero_width_only_atoms,
+        next_cursor=next_cursor,
     )
 
 
@@ -141,7 +143,7 @@ def _grep_result() -> GrepResult:
 @pytest.mark.unit
 def test_search_code_payload_matches_golden_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     # grep is stubbed; the builder only needs the repo_id->name SELECT after it.
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep_result())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep_result())
     engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
 
     payload = main._search_code_payload(engine, _cfg(), "foo", 50)
@@ -180,7 +182,7 @@ def test_search_code_query_parse_error_maps_to_field(monkeypatch: pytest.MonkeyP
     def _raise(*_a: object, **_k: object) -> GrepResult:
         raise QueryParseError("bad query", 0)
 
-    monkeypatch.setattr(main, "grep_search", _raise)
+    monkeypatch.setattr(service, "grep_search", _raise)
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "case:maybe", 50)
 
     assert payload["query_parse_error"] == "bad query"
@@ -198,7 +200,7 @@ def test_search_code_query_too_broad_maps_to_signal(monkeypatch: pytest.MonkeyPa
     def _raise(*_a: object, **_k: object) -> GrepResult:
         raise QueryTooBroadError("too broad")
 
-    monkeypatch.setattr(main, "grep_search", _raise)
+    monkeypatch.setattr(service, "grep_search", _raise)
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "foo", 50)
 
     assert payload["query_too_broad"] is True
@@ -217,7 +219,7 @@ def test_search_code_truncation_and_regex_incompatible_passthrough(
     # regex_incompatible=True with both new flags False is the shape both grep helpers
     # guarantee: an uncompilable atom is a content atom of UNKNOWN width, never a proof.
     result = _grep(truncated=True, truncation_reason="byte_cap", regex_incompatible=True)
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: result)
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: result)
     engine = _FakeEngine([_FakeResult([])])  # empty repo-name map
 
     payload = main._search_code_payload(engine, _cfg(), "foo", 50)
@@ -245,9 +247,9 @@ def _sym_result(*matches: SymbolMatch, truncated: bool = False) -> SymbolResult:
 def test_sym_matches_merge_into_same_file_ordered_by_line(monkeypatch: pytest.MonkeyPatch) -> None:
     # grep finds a content match on line 3; symbol search finds a Handler def on line 2 of the
     # SAME file. They fold into one file entry, matches ordered by line (symbol first).
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep_result())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep_result())
     monkeypatch.setattr(
-        main,
+        service,
         "symbol_search",
         lambda *a, **k: _sym_result(
             SymbolMatch(
@@ -292,9 +294,9 @@ def test_sym_only_query_returns_symbol_file_grep_empty(monkeypatch: pytest.Monke
     # A sym:-only query IS filter-only at the grep layer, so grep reports no_content_atom=True;
     # the envelope must suppress it because the symbol leg answers. Live assertion below.
     empty_grep = _grep(no_content_atom=True)
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: empty_grep)
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: empty_grep)
     monkeypatch.setattr(
-        main,
+        service,
         "symbol_search",
         lambda *a, **k: _sym_result(
             SymbolMatch(
@@ -326,12 +328,12 @@ def test_sym_only_query_returns_symbol_file_grep_empty(monkeypatch: pytest.Monke
 @pytest.mark.unit
 def test_sym_leg_timeout_flags_query_too_broad_keeps_grep(monkeypatch: pytest.MonkeyPatch) -> None:
     # grep succeeds but the symbol leg times out: flag query_too_broad + truncated, keep content.
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep_result())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep_result())
 
     def _raise(*_a: object, **_k: object) -> SymbolResult:
         raise QueryTooBroadError("symbol leg too broad")
 
-    monkeypatch.setattr(main, "symbol_search", _raise)
+    monkeypatch.setattr(service, "symbol_search", _raise)
     engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
 
     payload = main._search_code_payload(engine, _cfg(), "sym:Handler foo", 50)
@@ -347,9 +349,9 @@ def test_sym_truncation_sets_row_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     # A sym:-only query IS filter-only at the grep layer, so grep reports no_content_atom=True;
     # the envelope must suppress it because the symbol leg answers. Live assertion below.
     empty_grep = _grep(no_content_atom=True)
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: empty_grep)
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: empty_grep)
     monkeypatch.setattr(
-        main,
+        service,
         "symbol_search",
         lambda *a, **k: _sym_result(
             SymbolMatch(
@@ -403,8 +405,8 @@ def _one_sym() -> SymbolResult:
 def test_filter_only_grep_sets_no_content_atom_on_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
     # The reported bug (AC1): `file:.md` returns zero files and the agent cannot tell that
     # from "no .md file contains anything". Now it can.
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep(no_content_atom=True))
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _no_sym())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep(no_content_atom=True))
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
 
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "file:.md", 50)
 
@@ -419,8 +421,8 @@ def test_filter_only_grep_sets_no_content_atom_on_envelope(monkeypatch: pytest.M
 def test_genuine_zero_match_does_not_set_no_content_atom(monkeypatch: pytest.MonkeyPatch) -> None:
     # The other half of AC1: an ordinary true negative reaches the SAME file_count of 0 with
     # the flag False. The pair is what makes the signal informative.
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep())
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _no_sym())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep())
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
 
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "zzznotpresentzzz", 50)
 
@@ -430,8 +432,8 @@ def test_genuine_zero_match_does_not_set_no_content_atom(monkeypatch: pytest.Mon
 
 @pytest.mark.unit
 def test_sym_only_query_does_not_set_no_content_atom(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep(no_content_atom=True))
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _one_sym())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep(no_content_atom=True))
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _one_sym())
     engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
 
     payload = main._search_code_payload(engine, _cfg(), "sym:Handler", 50)
@@ -445,12 +447,12 @@ def test_sym_leg_timeout_suppresses_no_content_atom(monkeypatch: pytest.MonkeyPa
     # A timed-out symbol leg yields sym_result is None, which is PROVABLY the sym-bearing
     # shape (only a DB hit can time out, and the leg short-circuits before the DB when there
     # is no sym: atom). The inverted `is not None and ...` form emits a false flag here.
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep(no_content_atom=True))
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep(no_content_atom=True))
 
     def _raise(*_a: object, **_k: object) -> SymbolResult:
         raise QueryTooBroadError("symbol leg too broad")
 
-    monkeypatch.setattr(main, "symbol_search", _raise)
+    monkeypatch.setattr(service, "symbol_search", _raise)
 
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "sym:Handler", 50)
 
@@ -464,8 +466,8 @@ def test_zero_width_with_sym_answer_is_suppressed(monkeypatch: pytest.MonkeyPatc
     # matches into files. Flagging a query that RETURNED RESULTS is the exact failure mode
     # suppression exists to prevent -- and it is what keeps grep's "flag implies files empty"
     # invariant true at this layer too.
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep(zero_width_only_atoms=True))
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _one_sym())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep(zero_width_only_atoms=True))
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _one_sym())
     engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
 
     payload = main._search_code_payload(engine, _cfg(), "sym:Handler /^/", 50)
@@ -481,11 +483,11 @@ def test_zero_width_query_sets_flag_without_regex_incompatible(
     # AC3: `/^/` compiled fine, so regex_incompatible stays False -- the two signals are
     # distinct conditions and the envelope mirrors both faithfully.
     monkeypatch.setattr(
-        main,
+        service,
         "grep_search",
         lambda *a, **k: _grep(zero_width_only_atoms=True, regex_incompatible=False),
     )
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _no_sym())
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
 
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "/^/", 50)
 
@@ -499,8 +501,8 @@ def test_zero_width_query_sets_flag_without_regex_incompatible(
 def test_envelope_keys_are_pinned_shape_plus_exactly_two(monkeypatch: pytest.MonkeyPatch) -> None:
     # The envelope is additive-only and permanent: pin that this change added the two named
     # keys and NOTHING else, and removed nothing.
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: _grep())
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _no_sym())
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep())
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
 
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "foo", 50)
 
@@ -836,9 +838,12 @@ def test_search_code_splits_divergent_content_versions_of_one_path(
         regex_incompatible=False,
         no_content_atom=False,
         zero_width_only_atoms=False,
+        next_cursor=None,
     )
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: result)
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _no_sym())
+    # The payload builder lives in app/service.py (issue #35 extraction), so it resolves
+    # grep_search/symbol_search from THAT module's globals -- patch service.*, not main.*.
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: result)
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
     engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
 
     payload = main._search_code_payload(engine, _cfg(), "foo", 50)

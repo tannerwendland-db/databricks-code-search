@@ -98,7 +98,7 @@ wait_active() {
 }
 
 cmd_full() {
-	local app_name scope key file_path state app_sp_role url
+	local app_name webui_app_name scope key file_path state app_sp_role webui_sp_role url webui_url
 
 	# 1. Validate — already run above (the JSON derivation is the exit-0 gate).
 	if [ "$TARGET" = prod ]; then
@@ -107,17 +107,24 @@ cmd_full() {
 			die "prod deploy requires JOB_RUN_AS_SP=<job run-as SP client id>"
 	fi
 	app_name=$(req "$(jval app_name)" "app name")
+	webui_app_name=$(req "$(jval webui_app_name)" "webui app name")
 	scope=$(req "$(jval github_token_secret_scope)" "secret scope")
 	key=$(req "$(jval github_token_secret_key)" "secret key")
 	file_path=$(req "$(jworkspace file_path)" "workspace file_path")
 
-	# 2. Deploy — ships definitions (Lakebase project/endpoint/catalog, prod job_writer role,
-	#    secret scope, job, app definition). Does NOT start app compute.
-	echo "deploy: [2/8] bundle deploy -t $TARGET"
+	# 2. Build the webui wheel — stages a fresh app.whl into webui/wheels/ BEFORE deploy: Apps
+	#    source sync (step 3) uploads whatever is on disk at deploy time, and a stale/missing
+	#    wheel means the webui app can't import `app.*` at start.
+	echo "deploy: [2/11] make webui-wheel"
+	make webui-wheel
+
+	# 3. Deploy — ships definitions (Lakebase project/endpoint/catalog, prod job_writer role,
+	#    secret scope, job, both app definitions). Does NOT start app compute.
+	echo "deploy: [3/11] bundle deploy -t $TARGET"
 	databricks bundle deploy -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
 
-	# 3. GitHub token secret check (indexing is optional for a running app).
-	echo "deploy: [3/8] GitHub token secret check (scope=$scope key=$key)"
+	# 4. GitHub token secret check (indexing is optional for a running app).
+	echo "deploy: [4/11] GitHub token secret check (scope=$scope key=$key)"
 	if databricks secrets list-secrets "$scope" -o json 2>/dev/null |
 		jq -e --arg k "$key" 'any(.[]; .key==$k)' >/dev/null 2>&1; then
 		echo "deploy: secret '$key' already present in scope '$scope'"
@@ -128,14 +135,15 @@ cmd_full() {
 			"or re-run deploy after setting it"
 	fi
 
-	# 4. Migrate (schema only) — alembic upgrade head as the developer identity. No grants yet
-	#    (Decision A1): the app SP pg role does not exist until first activation (step 5). The
-	#    developer thereby owns the tables and needs no later job grant on dev.
-	echo "deploy: [4/8] make migrate (schema only)"
+	# 5. Migrate (schema only) — alembic upgrade head as the developer identity. No grants yet
+	#    (Decision A1): neither app's SP pg role exists until its first activation (steps 6, 8).
+	#    The developer thereby owns the tables and needs no later job grant on dev.
+	echo "deploy: [5/11] make migrate (schema only)"
 	make migrate TARGET="$TARGET"
 
-	# 5. Run app — ships app source AND starts compute; the app SP + its pg role materialize here.
-	echo "deploy: [5/8] bundle run code_search (ship source + start compute)"
+	# 6. Run the MCP app — ships app source AND starts compute; the app SP + its pg role
+	#    materialize here.
+	echo "deploy: [6/11] bundle run code_search (ship source + start compute)"
 	databricks bundle run code_search -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
 	state=$(wait_active "$app_name")
 	if [ "$state" != ACTIVE ]; then
@@ -148,9 +156,10 @@ cmd_full() {
 			die "app '$app_name' never reached ACTIVE (last state: ${state:-unknown})"
 	fi
 
-	# 6. Grants (post-activation, Decision C1 + D1). APP_SP_ROLE is derived FRESH from apps get
-	#    at this moment and guarded by req before it can ever reach validate_role.
-	echo "deploy: [6/8] grants (post-activation)"
+	# 7. Grants for the MCP app (post-activation, Decision C1 + D1). APP_SP_ROLE is derived
+	#    FRESH from apps get at this moment and guarded by req before it can ever reach
+	#    validate_role.
+	echo "deploy: [7/11] grants (post-activation)"
 	app_sp_role=$(req "$(databricks apps get "$app_name" -o json |
 		jq -er '.service_principal_client_id')" "app SP client id")
 	# dev grants the app only (job_writer_role="" is falsy → migrate.py's `if job_env:` skips
@@ -172,11 +181,35 @@ cmd_full() {
 	retry 5 10 grant_attempt "$app_sp_role" "$job_writer_role" "$TARGET" ||
 		die "grants failed after retries (is the app SP role visible in pg_roles yet?)"
 
-	# 7. First index — the config is the only source of truth, and only the job can resolve it
-	#    (expanding orgs/users needs the GitHub API + the secret + the pydantic filters).
-	#    Non-fatal: a missing GitHub token (step 3 only warns) must not abort a deploy whose
-	#    app is already ACTIVE and granted.
-	echo "deploy: [7/8] first index"
+	# 8. Run webui (#35) — same shape as step 6, second app, second SP, same first-activation
+	#    fallback.
+	echo "deploy: [8/11] bundle run webui (ship source + start compute)"
+	databricks bundle run webui -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
+	state=$(wait_active "$webui_app_name")
+	if [ "$state" != ACTIVE ]; then
+		echo "deploy: webui did not activate via bundle run; falling back to apps deploy" >&2
+		databricks apps deploy "$webui_app_name" --source-code-path "$file_path/webui"
+		databricks bundle run webui -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
+		state=$(wait_active "$webui_app_name")
+		[ "$state" = ACTIVE ] ||
+			die "app '$webui_app_name' never reached ACTIVE (last state: ${state:-unknown})"
+	fi
+
+	# 9. Grants for webui (post-activation) — same read-only grant as the MCP app's SP (step 7),
+	#    applied to webui's own SP. No job-writer role here: the job grant was already applied
+	#    in step 7 and is not re-applied per app (grant_attempt's job_role arg is "" → skipped,
+	#    same falsy-skip behavior as dev in step 7).
+	echo "deploy: [9/11] webui grants (post-activation)"
+	webui_sp_role=$(req "$(databricks apps get "$webui_app_name" -o json |
+		jq -er '.service_principal_client_id')" "webui app SP client id")
+	retry 5 10 grant_attempt "$webui_sp_role" "" "$TARGET" ||
+		die "webui grants failed after retries (is the webui app SP role visible in pg_roles yet?)"
+
+	# 10. First index — the config is the only source of truth, and only the job can resolve it
+	#     (expanding orgs/users needs the GitHub API + the secret + the pydantic filters).
+	#     Non-fatal: a missing GitHub token (step 4 only warns) must not abort a deploy whose
+	#     apps are already ACTIVE and granted.
+	echo "deploy: [10/11] first index"
 	if databricks bundle run code_search_index -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}; then
 		echo "deploy: first index complete"
 	else
@@ -184,26 +217,31 @@ cmd_full() {
 			"then re-run 'make index TARGET=$TARGET'" >&2
 	fi
 
-	# 8. Final banner.
+	# 11. Final banner.
 	url=$(req "$(databricks apps get "$app_name" -o json | jq -er '.url')" "app url")
-	echo "deploy: [8/8] DONE — app URL: $url"
+	webui_url=$(req "$(databricks apps get "$webui_app_name" -o json | jq -er '.url')" "webui app url")
+	echo "deploy: [11/11] DONE — app URL: $url"
+	echo "deploy: DONE — webui URL: $webui_url"
 	echo "deploy: reminder — the account-admin OAuth app connection (M2M) for the custom MCP app"
 	echo "deploy: cannot be created by the bundle; an account admin must create it before external"
-	echo "deploy: MCP clients (or the automated smoke MCP leg) can authenticate."
+	echo "deploy: MCP clients (or the automated smoke MCP leg) can authenticate. The webui app"
+	echo "deploy: needs no such connection — it is a plain browser-facing app gated by CAN_USE."
 }
 
 cmd_destroy() {
-	local project endpoint_name scope app_name catalog ans
+	local project endpoint_name scope app_name webui_app_name catalog ans
 	project=$(req "$(jval lakebase_project_name)" "lakebase project name")
 	endpoint_name=$(req "$(jval lakebase_endpoint_name)" "lakebase endpoint name")
 	scope=$(req "$(jval github_token_secret_scope)" "secret scope")
 	app_name=$(req "$(jval app_name)" "app name")
+	webui_app_name=$(req "$(jval webui_app_name)" "webui app name")
 	catalog=$(req "$(jval catalog_name)" "catalog name")
 
 	echo "This will run 'databricks bundle destroy -t $TARGET --auto-approve'."
 	echo "DESTROYS: Lakebase project '$project' (production branch + endpoint '$endpoint_name')"
 	echo "  and ALL indexed data (repos/files/symbols), the UC catalog '$catalog',"
-	echo "  the secret scope '$scope', the app '$app_name', and the indexing job. NOT RECOVERABLE."
+	echo "  the secret scope '$scope', both apps ('$app_name', '$webui_app_name'), and the"
+	echo "  indexing job. NOT RECOVERABLE."
 	printf 'Type the project name (%s) to confirm: ' "$project"
 	read -r ans
 	[ "$ans" = "$project" ] || die "confirmation mismatch; aborting"

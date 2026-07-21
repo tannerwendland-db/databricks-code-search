@@ -35,6 +35,9 @@ variables:
   app_name:
     description: "Databricks App name (must start with mcp-). Consumed by the app resource in #11/#12."
     default: mcp-code-search
+  webui_app_name:
+    description: "Databricks App name for the web UI (second app, #35). Consumed by resources/webui.yml."
+    default: webui-code-search
   job_run_as_sp:
     description: >-
       Prod ONLY: client id of the pre-created job run-as service principal (writer).

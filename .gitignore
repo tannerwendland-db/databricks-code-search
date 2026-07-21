@@ -9,8 +9,20 @@ __pycache__/
 .mypy_cache/
 *.egg-info/
 dist/
+# The webui frontend's committed production build (#35) — `dist/` above is an unqualified
+# pattern and would otherwise swallow it too. DABs Apps source sync respects .gitignore, so
+# an unnegated webui/frontend/dist/ would silently never upload and the app would serve no UI.
+!webui/frontend/dist/
 build/
 pgdata/
+node_modules/
+
+# webui/wheels/app.whl is a deploy-time build artifact (`make webui-wheel`, mirroring the
+# top-level wheel target) that the webui app imports `app.*` from. Nothing above currently
+# matches it, but pin the negation anyway — cheap, self-documenting insurance (same reasoning
+# as the config.yaml sync include below) against a future broad ignore rule (e.g. a stray
+# `*.whl`) silently breaking webui's source sync.
+!webui/wheels/*.whl
 
 # uv.lock not tracked yet: local resolver pins the internal Databricks PyPI proxy,
 # which public CI cannot reach. CI resolves fresh against public PyPI. See issue #3.

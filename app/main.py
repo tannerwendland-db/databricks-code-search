@@ -42,22 +42,15 @@ from typing import Any
 
 import anyio
 from mcp.server.fastmcp import Context, FastMCP
-from sqlalchemy import Text, any_, func, literal, select
-from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.engine import Engine
-from sqlalchemy.sql.elements import ColumnElement
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from app.config import Settings, get_settings
+from app import service
+from app.config import get_settings
 from app.db.client import create_db_engine
-from app.db.models import File, Repo, RepoBranch
-from app.query.parser import QueryParseError
-from app.search.errors import QueryTooBroadError
-from app.search.grep import grep_search
 from app.search.semantic import _semantic_search_payload
-from app.search.symbols import SymbolResult, symbol_search
 
 logger = logging.getLogger("app.tools")
 
@@ -149,11 +142,18 @@ async def _dispatch(name: str, build: Callable[[], dict[str, Any]]) -> str:
     return json.dumps(payload)
 
 
-def _clamp_limit(limit: int, cfg: Settings) -> int:
-    """Clamp a caller-supplied ``limit``: ``<=0`` -> default; ``> max`` -> hard cap."""
-    if limit <= 0:
-        return cfg.row_limit
-    return min(limit, cfg.max_row_limit)
+# ------------------------------------------------------------------------ payload builders
+#
+# The payload builders (clamp_limit / search_code_payload / list_repos_payload /
+# get_file_payload) live in app/service.py (issue #35) so a second Databricks App (webui/) can
+# call them in-process without importing this module's ASGI-app-building side effects. These
+# aliases keep this module's own call sites and existing tests unchanged; they are the exact
+# same function objects, so tests monkeypatching their collaborators must patch `service.*`
+# (function globals resolve in the DEFINING module, not here).
+_clamp_limit = service.clamp_limit
+_search_code_payload = service.search_code_payload
+_list_repos_payload = service.list_repos_payload
+_get_file_payload = service.get_file_payload
 
 
 def _append_branch_atom(query: str, branch: str) -> str:
@@ -164,378 +164,6 @@ def _append_branch_atom(query: str, branch: str) -> str:
     """
     escaped = branch.replace('"', '\\"')
     return f'{query} branch:"{escaped}"'.strip()
-
-
-# ------------------------------------------------------------------------ payload builders
-#
-# Pure-ish builders (engine + config in, dict out) so unit tests pin the exact wire shape
-# without the SDK. Each opens its own connection INSIDE the worker thread (never shares one
-# across threads). Shapes are pinned to zoekt parity (tests/unit/test_main.py).
-
-
-def _repo_name_map(conn: Any) -> dict[int, str]:
-    """Map ``repo_id -> Repo.name`` for the current corpus (grep returns ids, not names)."""
-    return {row.id: row.name for row in conn.execute(select(Repo.id, Repo.name)).all()}
-
-
-def _search_envelope(
-    query: str,
-    *,
-    files: list[dict[str, Any]],
-    file_count: int,
-    match_count: int,
-    duration_ns: int,
-    truncated: bool,
-    truncation_reason: str | None,
-    regex_incompatible: bool,
-    query_too_broad: bool,
-    query_parse_error: str | None,
-    no_content_atom: bool,
-    zero_width_only_atoms: bool,
-) -> dict[str, Any]:
-    """Build the pinned ``search_code`` envelope (zoekt fields + additive signal fields).
-
-    ``no_content_atom`` -- the query carried no content atom at all (e.g. ``lang:go``), so
-    there was nothing to highlight and zero files is a *shape* outcome, not a true negative.
-    ``zero_width_only_atoms`` -- content atoms were present but every one provably matches
-    zero-width (e.g. ``/^/``), so every span was dropped. Mutually exclusive by construction.
-
-    Both are grep's per-leg fact AND-ed with "the symbol leg did not answer this query", so
-    neither ever fires beside results the caller can see. That suppression is what carries
-    grep's own invariants (see :class:`app.search.grep.GrepResult`) up to this layer:
-
-        If ``zero_width_only_atoms`` survives suppression then ``sym_answers`` is False, so
-        ``sym_result`` is non-None with ``no_symbol_atom=True``, so ``sym_result.symbols`` is
-        empty, so ``files`` comes only from grep -- which is empty by grep's invariant. QED
-
-    Additive and permanent: agents may depend on these keys, so they can never be removed.
-    """
-    return {
-        "query": query,
-        "file_count": file_count,
-        "match_count": match_count,
-        "duration_ns": duration_ns,
-        "files": files,
-        "truncated": truncated,
-        "truncation_reason": truncation_reason,
-        "regex_incompatible": regex_incompatible,
-        "query_too_broad": query_too_broad,
-        "query_parse_error": query_parse_error,
-        "no_content_atom": no_content_atom,
-        "zero_width_only_atoms": zero_width_only_atoms,
-    }
-
-
-def _search_code_payload(engine: Engine, cfg: Settings, query: str, limit: int) -> dict[str, Any]:
-    """Run grep + symbol search and shape the merged result to the zoekt parity envelope.
-
-    Content matches (grep) and ``sym:`` definition matches (:func:`symbol_search`) are folded
-    into one ``files`` -> ``matches`` list grouped by ``(repo_id, path, content_sha)`` (0003:
-    a path may have more than one indexed content version, one per divergent branch group, so
-    the merge key includes ``content_sha`` to keep them as distinct file entries -- each
-    carrying its own real ``branches`` membership array instead of the old hardcoded
-    ``["HEAD"]``), matching zoekt's single-tool model where ``sym:`` results ride the normal
-    envelope. A symbol match carries
-    ``symbols: [{name, kind}]`` and ``line`` = the definition's first line (no highlight ``text``
-    in V1, so ``grep_search("sym:X")`` -- which returns nothing highlight-driven -- is answered
-    here). ``QueryParseError`` -> ``query_parse_error`` + empty files; ``QueryTooBroadError``
-    (either leg) -> ``query_too_broad`` + ``truncated``. ``repo_id`` is resolved to ``Repo.name``.
-    ``byte_ranges`` are our UTF-8 line-local half-open offsets (documented divergence from
-    zoekt's char ``start_col``/``end_col``).
-
-    **Query-shape suppression (issue #31).** grep's ``no_content_atom`` /
-    ``zero_width_only_atoms`` are per-leg facts; both are ANDed here with ``not sym_answers``
-    so neither fires on a query the symbol leg answered. ``sym:Handler`` is filter-only to grep
-    but fully answered here, and ``sym:Handler /^/`` is zero-width-only to grep yet returns
-    files -- flagging either would contradict the results sitting beside it and train agents to
-    ignore the signal.
-
-    ``sym_answers`` treats an UNKNOWN symbol leg (``sym_result is None``, i.e. the leg timed
-    out) as answering, which is a proof rather than a precaution: ``None`` arises only from
-    ``QueryTooBroadError``, which means the DB was hit, which means the ``if not patterns``
-    short-circuit at ``symbols.py:173`` was False, which means the query HAD a ``sym:`` atom.
-    The inverted form (``sym_result is not None and ...``) would emit a false flag on exactly
-    that timed-out ``sym:`` query. Corollary: suppression can never swallow the filter-only
-    case this issue exists to signal -- a query like ``file:.md`` has no ``sym:`` atom, so it
-    short-circuits before any DB hit and can never reach ``sym_result is None``.
-    """
-    with engine.connect() as conn:
-        t0 = time.monotonic()
-        try:
-            result = grep_search(
-                conn,
-                query,
-                row_limit=limit,
-                max_content_bytes=cfg.max_content_bytes,
-                statement_timeout_ms=cfg.statement_timeout_ms,
-            )
-        except QueryParseError as error:
-            return _search_envelope(
-                query,
-                files=[],
-                file_count=0,
-                match_count=0,
-                duration_ns=int((time.monotonic() - t0) * 1e9),
-                truncated=False,
-                truncation_reason=None,
-                regex_incompatible=False,
-                query_too_broad=False,
-                query_parse_error=str(error),
-                no_content_atom=False,
-                zero_width_only_atoms=False,
-            )
-        except QueryTooBroadError:
-            # The whole query is over the time budget; the symbol leg would time out too.
-            return _search_envelope(
-                query,
-                files=[],
-                file_count=0,
-                match_count=0,
-                duration_ns=int((time.monotonic() - t0) * 1e9),
-                truncated=True,
-                truncation_reason=None,
-                regex_incompatible=False,
-                query_too_broad=True,
-                query_parse_error=None,
-                no_content_atom=False,
-                zero_width_only_atoms=False,
-            )
-
-        # Symbol leg: sym: definitions the highlight-driven grep path cannot return. A timeout
-        # here flags query_too_broad but still returns whatever grep found (partial, not a lie).
-        # Note: a `sym:X foo` query runs the compiler candidate scan twice (once per leg), each
-        # under its OWN statement_timeout -- so the DB-time bound is per-leg, not a single budget.
-        query_too_broad = False
-        try:
-            sym_result: SymbolResult | None = symbol_search(
-                conn,
-                query,
-                row_limit=limit,
-                statement_timeout_ms=cfg.statement_timeout_ms,
-            )
-        except QueryTooBroadError:
-            sym_result = None
-            query_too_broad = True
-
-        duration_ns = int((time.monotonic() - t0) * 1e9)
-
-        # Resolve names for every repo present across BOTH legs, bounded by the same
-        # transaction-local statement_timeout the other raw SELECTs use (each leg's own SET LOCAL
-        # committed with its transaction, so this lookup would otherwise run uncapped).
-        repo_ids = {fm.repo_id for fm in result.files}
-        if sym_result is not None:
-            repo_ids |= {sm.repo_id for sm in sym_result.symbols}
-        name_map: dict[int, str] = {}
-        if repo_ids:
-            with conn.begin():
-                conn.exec_driver_sql(
-                    f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}"
-                )
-                name_map = _repo_name_map(conn)
-
-    # Merge content + symbol matches into one file list grouped by (repo_id, path, content_sha)
-    # (0003: content_sha disambiguates divergent branch content versions of one path).
-    merged: dict[tuple[int, str, str], dict[str, Any]] = {}
-
-    def _entry(
-        repo_id: int, path: str, lang: str | None, content_sha: str, branches: tuple[str, ...]
-    ) -> dict[str, Any]:
-        key = (repo_id, path, content_sha)
-        entry = merged.get(key)
-        if entry is None:
-            entry = {
-                "repo_id": repo_id,
-                "path": path,
-                "lang": lang,
-                "content_sha": content_sha,
-                "branches": branches,
-                "matches": [],
-            }
-            merged[key] = entry
-        return entry
-
-    match_count = 0
-    for fm in result.files:
-        entry = _entry(fm.repo_id, fm.path, fm.lang, fm.content_sha, fm.branches)
-        for lm in fm.line_matches:
-            entry["matches"].append(
-                {
-                    "line": lm.line_number,
-                    "text": lm.line_text,
-                    "byte_ranges": [[start, end] for start, end in lm.byte_ranges],
-                }
-            )
-        # match_count counts matched spans (byte_ranges), not lines: the golden zoekt fixture
-        # reports 2 for one line carrying two ranges.
-        match_count += sum(len(lm.byte_ranges) for lm in fm.line_matches)
-
-    if sym_result is not None:
-        for sm in sym_result.symbols:
-            entry = _entry(sm.repo_id, sm.path, sm.lang, sm.content_sha, sm.branches)
-            entry["matches"].append(
-                {
-                    "line": sm.start_line,
-                    "text": "",  # V1: line + name + kind, no def-line text (documented follow-up)
-                    "byte_ranges": [],
-                    "symbols": [{"name": sm.name, "kind": sm.kind}],
-                }
-            )
-            match_count += 1  # each symbol definition is one match (its byte_ranges is empty)
-
-    files: list[dict[str, Any]] = []
-    for entry in sorted(merged.values(), key=lambda e: (e["repo_id"], e["path"], e["content_sha"])):
-        # Order matches within a file by line; NULL symbol lines sort last.
-        entry["matches"].sort(key=lambda m: (m["line"] is None, m["line"] or 0))
-        files.append(
-            {
-                "repo": name_map.get(entry["repo_id"], str(entry["repo_id"])),
-                "file": entry["path"],
-                "language": entry["lang"],
-                "branches": list(entry["branches"]),  # real membership (0003), not hardcoded
-                "matches": entry["matches"],
-            }
-        )
-
-    # `is None or` is load-bearing: an unknown (timed-out) symbol leg counts as answering, and
-    # is provably always the sym-bearing shape. See the docstring.
-    sym_answers = sym_result is None or not sym_result.no_symbol_atom
-    no_content_atom = result.no_content_atom and not sym_answers
-    zero_width_only_atoms = result.zero_width_only_atoms and not sym_answers
-
-    sym_truncated = sym_result.truncated if sym_result is not None else False
-    truncated = result.truncated or sym_truncated or query_too_broad
-    truncation_reason = result.truncation_reason or (
-        sym_result.truncation_reason if sym_result is not None else None
-    )
-    return _search_envelope(
-        query,
-        files=files,
-        file_count=len(files),
-        match_count=match_count,
-        duration_ns=duration_ns,
-        truncated=truncated,
-        truncation_reason=truncation_reason,
-        regex_incompatible=result.regex_incompatible,
-        query_too_broad=query_too_broad,
-        query_parse_error=None,
-        no_content_atom=no_content_atom,
-        zero_width_only_atoms=zero_width_only_atoms,
-    )
-
-
-def _list_repos_payload(engine: Engine, cfg: Settings) -> dict[str, Any]:
-    """List indexed repos with metadata, bounded by a transaction-local statement_timeout.
-
-    Branches are enumerated from ``repo_branches`` (0003) -- the authoritative per-branch
-    registry -- rather than guessed from the single ``repos.default_branch`` stamp, so a repo
-    indexed on multiple branches reports all of them. ``branches`` stays a flat name list, the
-    SAME shape as the old hardcoded single-element list, so a single-branch repo still renders
-    an array of one (additive-only: no existing key removed or reshaped). Per-branch detail
-    (``last_indexed_commit``/``index_time``) is carried in the new ``branch_details`` list; the
-    top-level ``index_time``/``last_indexed_commit`` mirror the repo's default-branch row
-    (falling back to the first enumerated branch if the default itself was never indexed).
-    """
-    with engine.connect() as conn:
-        with conn.begin():
-            # SET LOCAL (int-coerced -> injection-safe) is transaction-scoped, so it never
-            # leaks a statement_timeout onto the pooled connection (unlike a session-level SET).
-            conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}")
-            rows = conn.execute(
-                select(
-                    Repo.id,
-                    Repo.name,
-                    Repo.default_branch,
-                    RepoBranch.branch,
-                    RepoBranch.last_indexed_commit,
-                    RepoBranch.last_indexed_at,
-                )
-                .select_from(Repo)
-                .outerjoin(RepoBranch, RepoBranch.repo_id == Repo.id)
-                .order_by(Repo.name, RepoBranch.branch)
-            ).all()
-
-    grouped: dict[int, dict[str, Any]] = {}
-    order: list[int] = []
-    for row in rows:
-        entry = grouped.get(row.id)
-        if entry is None:
-            entry = {"name": row.name, "default_branch": row.default_branch, "branch_rows": []}
-            grouped[row.id] = entry
-            order.append(row.id)
-        if row.branch is not None:
-            entry["branch_rows"].append(
-                {
-                    "branch": row.branch,
-                    "last_indexed_commit": row.last_indexed_commit,
-                    "index_time": row.last_indexed_at.isoformat() if row.last_indexed_at else None,
-                }
-            )
-
-    repos: list[dict[str, Any]] = []
-    for repo_id in order:
-        entry = grouped[repo_id]
-        branch_rows: list[dict[str, Any]] = entry["branch_rows"]
-        default = entry["default_branch"] or "HEAD"
-        default_row = next((b for b in branch_rows if b["branch"] == default), None)
-        if default_row is None and branch_rows:
-            default_row = branch_rows[0]
-        repos.append(
-            {
-                "name": entry["name"],
-                "branches": [b["branch"] for b in branch_rows] or ["HEAD"],
-                "index_time": default_row["index_time"] if default_row else None,
-                "default_branch": entry["default_branch"],
-                "last_indexed_commit": default_row["last_indexed_commit"] if default_row else None,
-                "branch_details": branch_rows,
-            }
-        )
-    return {"repos": repos, "count": len(repos)}
-
-
-def _get_file_payload(
-    engine: Engine, cfg: Settings, repo: str, path: str, branch: str | None = None
-) -> dict[str, Any]:
-    """Fetch one file's full content by (repo name, path), scoped to one content version.
-
-    A path may now have more than one indexed content version (0003: one per divergent branch
-    group), so the predicate MUST resolve to <=1 row per ``(repo, path)``: an explicit
-    ``branch`` uses the GIN-served exact-membership operator ``branches @> ARRAY[:branch]``
-    (Option C1, the same as the query compiler's ``branch:`` lowering); omitted, it falls back
-    to the correlated ``coalesce(repos.default_branch, 'HEAD') = ANY(files.branches)`` --
-    byte-identical to the compiler's implicit default conjunct, the ``0003`` backfill, and the
-    semantic default leg. A branch name is a member of at most one content version of a given
-    path (a branch points at one tree), so both predicates keep the single-row guarantee
-    ``scalar_one_or_none()`` relies on -- a second row would raise ``MultipleResultsFound``,
-    signalling the guarantee broke rather than a bug here. Returns the RESOLVED ``branch``
-    (the given branch, or the repo's real default/`'HEAD'`) instead of the old hardcoded
-    ``"HEAD"``; a miss stays a structured ``found: False``.
-    """
-    with engine.connect() as conn:
-        with conn.begin():
-            conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}")
-            predicate: ColumnElement[bool]
-            if branch is not None:
-                predicate = File.branches.op("@>")(literal([branch], type_=ARRAY(Text)))
-                resolved_branch = branch
-            else:
-                default_branch = conn.execute(
-                    select(func.coalesce(Repo.default_branch, "HEAD")).where(Repo.name == repo)
-                ).scalar_one_or_none()
-                resolved_branch = default_branch or "HEAD"
-                predicate = func.coalesce(Repo.default_branch, "HEAD") == any_(File.branches)
-            content = conn.execute(
-                select(File.content)
-                .join(Repo, File.repo_id == Repo.id)
-                .where(Repo.name == repo, File.path == path, predicate)
-            ).scalar_one_or_none()
-    found = content is not None
-    return {
-        "repo": repo,
-        "path": path,
-        "branch": resolved_branch,
-        "content": content,
-        "found": found,
-    }
 
 
 # ------------------------------------------------------------------------------- lifespan
@@ -619,9 +247,9 @@ async def list_repos(ctx: Context) -> str:
 async def get_file(repo: str, path: str, ctx: Context, branch: str | None = None) -> str:
     """Return the full content of a file by repository name and path (miss -> ``found:false``).
 
-    ``branch`` disambiguates when a path has more than one indexed content version: given,
-    resolves to the version whose branches include it (exact match); omitted, resolves to the
-    repo's default branch. The payload's ``branch`` field reports the resolved branch name.
+    ``branch`` scopes the lookup to the content version indexed on that branch (0003: one path
+    may have several); omitted, it resolves to the repo's default branch. The RESOLVED branch
+    is echoed back in the payload.
     """
     lc = ctx.request_context.lifespan_context
     return await _dispatch(

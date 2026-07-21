@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: install run test test-integration lint fmt fmt-check requirements clean help migrate migrate-semantic migrate-local migration set-secrets deploy deploy-prod smoke index destroy diagrams
+.PHONY: install run test test-integration lint fmt fmt-check requirements clean help migrate migrate-semantic migrate-local migration set-secrets deploy deploy-prod smoke index destroy diagrams webui-wheel webui-build webui-test
 
 # Secret scope/key for `set-secrets`. These MUST match the bundle variables
 # `github_token_secret_scope` / `github_token_secret_key` in databricks.yml
@@ -17,8 +17,8 @@ TARGET ?= dev
 PROFILE ?= DEFAULT
 export DATABRICKS_CONFIG_PROFILE := $(PROFILE)
 
-install: ## Install all dependencies (incl. dev group)
-	uv sync --all-groups
+install: ## Install all dependencies (incl. dev group and optional extras, e.g. webui's fastapi)
+	uv sync --all-groups --all-extras
 
 run: ## Run the MCP server locally (dual-mode: set PGHOST + PG* for local Postgres; binds DATABRICKS_APP_PORT or 8000)
 	uv run sh -c 'uvicorn app.main:app --host 0.0.0.0 --port $${DATABRICKS_APP_PORT:-8000}'
@@ -30,7 +30,7 @@ test-integration: ## Run integration tests (need Postgres: integration + streama
 	uv run pytest -m "integration or e2e"
 
 lint: ## Run ruff check + format check + mypy
-	uv run ruff check . && uv run ruff format --check . && uv run mypy app indexer
+	uv run ruff check . && uv run ruff format --check . && uv run mypy app indexer webui
 
 fmt: ## Auto-format code with ruff
 	uv run ruff format .
@@ -89,6 +89,18 @@ smoke: ## Smoke-test the deployed app (TARGET=dev|prod; ARGS=--expect-indexed/--
 
 index: ## Run the indexing job on TARGET (populates repos/files/symbols from configured repos)
 	databricks bundle run code_search_index -t $(TARGET)
+
+webui-wheel: ## Build the app wheel and stage it as webui/wheels/app.whl (fixed name; run before bundle deploy so webui's source sync picks up a fresh wheel)
+	rm -f dist/*.whl
+	uv build --wheel
+	mkdir -p webui/wheels
+	cp dist/*.whl webui/wheels/app.whl
+
+webui-build: ## Build the webui frontend (npm ci + vite build) into webui/frontend/dist/, which is committed
+	cd webui/frontend && npm ci && npm run build
+
+webui-test: ## Run the webui frontend test suite (vitest; advisory, not a repo gate)
+	cd webui/frontend && npm test
 
 destroy: ## Tear down the whole bundle for TARGET (typed-confirm; irreversible Lakebase data loss)
 	bash scripts/deploy.sh destroy $(TARGET)
