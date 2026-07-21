@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from dataclasses import dataclass
 from typing import Any, assert_never
 
 from sqlalchemy import Text, any_, func, literal, select
@@ -29,6 +30,7 @@ from app.db.models import File, Repo, RepoBranch
 from app.query.parser import (
     And,
     BranchFilter,
+    CommitFilter,
     LangFilter,
     Node,
     Or,
@@ -161,8 +163,63 @@ def _collect_branch_filters(node: Node) -> frozenset[str]:
             return frozenset({v})
         case And(children=children) | Or(children=children):
             return frozenset().union(*(_collect_branch_filters(c) for c in children))
-        case Substring() | Regex() | RepoFilter() | PathFilter() | LangFilter() | SymbolFilter():
+        case (
+            Substring()
+            | Regex()
+            | RepoFilter()
+            | PathFilter()
+            | LangFilter()
+            | SymbolFilter()
+            | CommitFilter()
+        ):
+            # CommitFilter is deliberately benign here (a skip, never a raise): a commit scope is
+            # its own resolution path (see _collect_commit_filters) and carries no branch: value.
             return frozenset()
+        case _:
+            assert_never(node)
+
+
+def _collect_commit_filters(node: Node) -> frozenset[str]:
+    """Collect every ``commit:`` hex prefix in ``node``, under any ``And``/``Or`` nesting.
+
+    An empty ``frozenset`` means the query carries no ``commit:`` atom. Mirrors
+    :func:`_collect_branch_filters`: exhaustive tail (``assert_never``) so a future :data:`Node`
+    variant is a mypy error, not a silently-dropped prefix.
+    """
+    match node:
+        case CommitFilter(value=v):
+            return frozenset({v})
+        case And(children=children) | Or(children=children):
+            return frozenset().union(*(_collect_commit_filters(c) for c in children))
+        case (
+            Substring()
+            | Regex()
+            | RepoFilter()
+            | PathFilter()
+            | LangFilter()
+            | SymbolFilter()
+            | BranchFilter()
+        ):
+            return frozenset()
+        case _:
+            assert_never(node)
+
+
+def _has_content_atom(node: Node) -> bool:
+    """True iff ``node`` carries a content-bearing atom (``Substring``/``Regex``/``SymbolFilter``).
+
+    This is what distinguishes a ``commit:`` query's two moods: a bare ``commit:<hash>`` (no
+    content atom) is a reverse-lookup that returns the resolution only, while ``commit:<hash>
+    <terms>`` is a scoped search. ``file:``/``lang:``-only queries alongside a commit atom count
+    as bare (resolution only) in v1 -- they carry no content to highlight.
+    """
+    match node:
+        case Substring() | Regex() | SymbolFilter():
+            return True
+        case And(children=children) | Or(children=children):
+            return any(_has_content_atom(child) for child in children)
+        case RepoFilter() | PathFilter() | LangFilter() | BranchFilter() | CommitFilter():
+            return False
         case _:
             assert_never(node)
 
@@ -192,6 +249,86 @@ def _select_permalink_branch(
     return min(row_branches) if row_branches else None
 
 
+@dataclass(frozen=True)
+class ResolvedCommit:
+    """One (repo, branch) head that a ``commit:`` prefix resolves to (issue: git-hash search).
+
+    Sourced from ``repo_branches.last_indexed_commit`` -- the ONLY commit truth-source, never the
+    ambiguous ``files.commit`` (models.py:88). ``index_time`` aliases the ``last_indexed_at``
+    column exactly as :func:`list_repos_payload` does; :meth:`as_payload` is the wire shape
+    carried by the ``resolved`` envelope field and the UI banner.
+    """
+
+    repo: str
+    branch: str
+    commit: str
+    index_time: str | None
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "repo": self.repo,
+            "branch": self.branch,
+            "commit": self.commit,
+            "index_time": self.index_time,
+        }
+
+
+def resolve_commit_prefix(conn: Any, prefix: str) -> list[ResolvedCommit]:
+    """Resolve a ``commit:`` hex prefix to every (repo, branch) indexed at a matching head SHA.
+
+    Reads ONLY ``repo_branches.last_indexed_commit`` (never ``files.commit``): the column is
+    aliased ``index_time`` to mirror :func:`list_repos_payload`. Both sides are lowered in SQL
+    (``lower(last_indexed_commit) LIKE lower(:p) || '%'``) so a mixed-case-stored SHA still
+    matches; ``prefix`` is hex-only (parser-validated) so it carries no ``LIKE`` metacharacters.
+    The same ``LIKE`` expression backs the compiler's ``CommitFilter`` subquery, so the resolved
+    list and the scoped-search results agree by construction.
+    """
+    name_map = _repo_name_map(conn)
+    rows = conn.execute(
+        select(
+            RepoBranch.repo_id,
+            RepoBranch.branch,
+            RepoBranch.last_indexed_commit,
+            RepoBranch.last_indexed_at,
+        ).where(
+            func.lower(RepoBranch.last_indexed_commit).like(func.lower(literal(prefix)).concat("%"))
+        )
+    ).all()
+    return [
+        ResolvedCommit(
+            repo=name_map.get(row.repo_id, str(row.repo_id)),
+            branch=row.branch,
+            commit=row.last_indexed_commit,
+            index_time=row.last_indexed_at.isoformat() if row.last_indexed_at else None,
+        )
+        for row in rows
+    ]
+
+
+def _scope_branch(
+    branch_filters: frozenset[str],
+    resolved: list[ResolvedCommit] | None,
+    repo: str,
+    row_branches: tuple[str, ...],
+) -> str | None:
+    """Pick the one branch a result row's permalink/commit metadata resolves to.
+
+    An explicit ``branch:`` filter takes precedence (delegates to :func:`_select_permalink_branch`
+    exactly as before commit search existed). Otherwise, for a commit-scoped query, the row was
+    matched via the ``repo_branches`` subquery, so it resolves to the lexicographically smallest
+    branch shared by this row and this repo's resolved commit heads. ``None`` for a query that is
+    neither branch- nor commit-scoped -- the pre-existing default-branch behavior.
+    """
+    if branch_filters:
+        return _select_permalink_branch(branch_filters, row_branches)
+    if resolved:
+        applicable = sorted(
+            {r.branch for r in resolved if r.repo == repo}.intersection(row_branches)
+        )
+        return applicable[0] if applicable else None
+    return None
+
+
 def clamp_limit(limit: int, cfg: Settings) -> int:
     """Clamp a caller-supplied ``limit``: ``<=0`` -> default; ``> max`` -> hard cap."""
     if limit <= 0:
@@ -219,6 +356,8 @@ def _search_envelope(
     no_content_atom: bool,
     zero_width_only_atoms: bool,
     next_cursor: str | None | _Unset = _UNSET,
+    resolved: list[dict[str, Any]] | _Unset = _UNSET,
+    commit_not_indexed: bool | _Unset = _UNSET,
 ) -> dict[str, Any]:
     """Build the pinned ``search_code`` envelope (zoekt fields + additive signal fields).
 
@@ -242,6 +381,12 @@ def _search_envelope(
     by ``tests/unit/test_main.py::test_envelope_keys_are_pinned_shape_plus_exactly_two``. Pass
     an explicit ``str | None`` only when ``search_code_payload`` was itself called with a
     ``cursor`` kwarg (pagination mode).
+
+    ``resolved``/``commit_not_indexed`` (git-hash search) are likewise OMITTED unless the query
+    carried a ``commit:`` atom -- so a non-commit query's shape is byte-identical to before, and
+    a consumer never sees the keys on a query that has no commit scope. When present, ``resolved``
+    lists every (repo, branch, commit, index_time) the prefix(es) resolved to and
+    ``commit_not_indexed`` is True iff that list is empty (no indexed branch at that commit).
     """
     envelope: dict[str, Any] = {
         "query": query,
@@ -259,6 +404,10 @@ def _search_envelope(
     }
     if not isinstance(next_cursor, _Unset):
         envelope["next_cursor"] = next_cursor
+    if not isinstance(resolved, _Unset):
+        envelope["resolved"] = resolved
+    if not isinstance(commit_not_indexed, _Unset):
+        envelope["commit_not_indexed"] = commit_not_indexed
     return envelope
 
 
@@ -334,8 +483,12 @@ def search_code_payload(
 
     with engine.connect() as conn:
         t0 = time.monotonic()
+        # Parse up front (rather than letting grep_search be the first parse) so commit resolution
+        # can gate leg execution: a bare or unresolvable `commit:` query must never fall through
+        # to an unfiltered / default-branch search. QueryParseError maps to the same field as
+        # before -- an invalid `commit:` hash (AC1) surfaces here.
         try:
-            result = grep_search(conn, query, **grep_kwargs)
+            node = parse(query)
         except QueryParseError as error:
             return _search_envelope(
                 query,
@@ -352,6 +505,51 @@ def search_code_payload(
                 zero_width_only_atoms=False,
                 next_cursor=(None if pagination_mode else _UNSET),
             )
+
+        branch_filters = _collect_branch_filters(node)
+        commit_prefixes = _collect_commit_filters(node)
+
+        # Commit resolution runs BEFORE any leg. `resolved` stays None for a non-commit query, so
+        # its envelope keys are omitted and the shape is byte-identical to before; a commit query
+        # gets a list (possibly empty). Each distinct prefix resolves once; results are unioned so
+        # a prefix collision or same-commit-on-many-branches scopes to every (repo, branch) pair.
+        resolved: list[ResolvedCommit] | None = None
+        if commit_prefixes:
+            resolved = []
+            for prefix in sorted(commit_prefixes):
+                resolved.extend(resolve_commit_prefix(conn, prefix))
+            has_content = _has_content_atom(node)
+            if not resolved or not has_content:
+                # Two short-circuit moods, both returning the resolution + empty results:
+                #   * no resolution -> commit_not_indexed True; never an unfiltered search (AC5);
+                #   * bare lookup   -> resolution only (AC2), commit IS indexed.
+                return _search_envelope(
+                    query,
+                    files=[],
+                    file_count=0,
+                    match_count=0,
+                    duration_ns=int((time.monotonic() - t0) * 1e9),
+                    truncated=False,
+                    truncation_reason=None,
+                    regex_incompatible=False,
+                    query_too_broad=False,
+                    query_parse_error=None,
+                    no_content_atom=not has_content,
+                    zero_width_only_atoms=False,
+                    next_cursor=(None if pagination_mode else _UNSET),
+                    resolved=[r.as_payload() for r in resolved],
+                    commit_not_indexed=not resolved,
+                )
+
+        # Commit envelope keys for the scoped-search path (resolutions exist AND a content atom):
+        # `resolved` is non-empty here, so commit_not_indexed is always False.
+        commit_kwargs: dict[str, Any] = {}
+        if resolved is not None:
+            commit_kwargs["resolved"] = [r.as_payload() for r in resolved]
+            commit_kwargs["commit_not_indexed"] = False
+
+        try:
+            result = grep_search(conn, query, **grep_kwargs)
         except QueryTooBroadError:
             # The whole query is over the time budget; the symbol leg would time out too.
             return _search_envelope(
@@ -368,12 +566,8 @@ def search_code_payload(
                 no_content_atom=False,
                 zero_width_only_atoms=False,
                 next_cursor=(None if pagination_mode else _UNSET),
+                **commit_kwargs,
             )
-
-        # `query` is now known parseable (both legs' early-return handling above is past), so
-        # this parse call is safe. This is its OWN parse -- deliberately not reusing the parse
-        # at the structural sym-atom check below, which only runs on continuation pages.
-        branch_filters = _collect_branch_filters(parse(query))
 
         # Symbol leg: sym: definitions the highlight-driven grep path cannot return. A timeout
         # here flags query_too_broad but still returns whatever grep found (partial, not a lie).
@@ -408,12 +602,25 @@ def search_code_payload(
         if sym_result is not None:
             repo_ids |= {sm.repo_id for sm in sym_result.symbols}
         name_map: dict[int, str] = {}
-        if repo_ids:
+        branch_commit_rows: list[Any] = []
+        if repo_ids or branch_filters:
             with conn.begin():
                 conn.exec_driver_sql(
                     f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}"
                 )
-                name_map = _repo_name_map(conn)
+                if repo_ids:
+                    name_map = _repo_name_map(conn)
+                if branch_filters:
+                    # Commit metadata for explicit branch: queries (AC9): each named branch's
+                    # indexed head SHA, from repo_branches (never files.commit). Commit-scoped
+                    # queries need no lookup here -- `resolved` already carries their commits.
+                    branch_commit_rows = list(
+                        conn.execute(
+                            select(Repo.name, RepoBranch.branch, RepoBranch.last_indexed_commit)
+                            .join(RepoBranch, RepoBranch.repo_id == Repo.id)
+                            .where(RepoBranch.branch.in_(sorted(branch_filters)))
+                        ).all()
+                    )
 
     # Merge content + symbol matches into one file list grouped by (repo_id, path, content_sha)
     # (0003: content_sha disambiguates divergent branch content versions of one path).
@@ -464,6 +671,15 @@ def search_code_payload(
             )
             match_count += 1  # each symbol definition is one match (its byte_ranges is empty)
 
+    # (repo name, branch) -> indexed head commit for result commit metadata (AC9). Commit-scoped
+    # rows come from `resolved` (already fetched); explicit branch: rows from branch_commit_rows.
+    commit_map: dict[tuple[str, str], str | None] = {}
+    if resolved:
+        for rc in resolved:
+            commit_map[(rc.repo, rc.branch)] = rc.commit
+    for row in branch_commit_rows:
+        commit_map[(row.name, row.branch)] = row.last_indexed_commit
+
     files: list[dict[str, Any]] = []
     for entry in sorted(merged.values(), key=lambda e: (e["repo_id"], e["path"], e["content_sha"])):
         # Order matches within a file by line; NULL symbol lines sort last.
@@ -472,17 +688,24 @@ def search_code_payload(
         # the MCP search_code tool and /api/search; per issue #46 the lexical MCP payload is
         # additive-only (Option A, consensus-approved). permalink_branch is service-selected --
         # clients must never infer a file version from the query.
-        files.append(
-            {
-                "repo": name_map.get(entry["repo_id"], str(entry["repo_id"])),
-                "file": entry["path"],
-                "language": entry["lang"],
-                "branches": list(entry["branches"]),  # real membership (0003), not hardcoded
-                "matches": entry["matches"],
-                "content_sha": entry["content_sha"],
-                "permalink_branch": _select_permalink_branch(branch_filters, entry["branches"]),
-            }
-        )
+        repo_name = name_map.get(entry["repo_id"], str(entry["repo_id"]))
+        scope_branch = _scope_branch(branch_filters, resolved, repo_name, entry["branches"])
+        file_entry: dict[str, Any] = {
+            "repo": repo_name,
+            "file": entry["path"],
+            "language": entry["lang"],
+            "branches": list(entry["branches"]),  # real membership (0003), not hardcoded
+            "matches": entry["matches"],
+            "content_sha": entry["content_sha"],
+            "permalink_branch": scope_branch,
+        }
+        # `commit` is additive and present ONLY when the scope resolves to a specific branch whose
+        # indexed head we know (AC9) -- so a non-scoped query's file shape is unchanged.
+        if scope_branch is not None:
+            commit = commit_map.get((repo_name, scope_branch))
+            if commit is not None:
+                file_entry["commit"] = commit
+        files.append(file_entry)
 
     if run_symbol_leg:
         # `is None or` is load-bearing: an unknown (timed-out) symbol leg counts as answering,
@@ -536,6 +759,7 @@ def search_code_payload(
         no_content_atom=no_content_atom,
         zero_width_only_atoms=zero_width_only_atoms,
         next_cursor=next_cursor_out,
+        **commit_kwargs,
     )
 
 
@@ -624,7 +848,9 @@ def get_file_payload(
     ``scalar_one_or_none()`` relies on -- a second row would raise ``MultipleResultsFound``,
     signalling the guarantee broke rather than a bug here. Returns the RESOLVED ``branch``
     (the given branch, or the repo's real default/`'HEAD'`) instead of the old hardcoded
-    ``"HEAD"``; a miss stays a structured ``found: False``.
+    ``"HEAD"``; a miss stays a structured ``found: False``. The resolved branch's indexed head
+    ``commit`` (AC9) is included from ``repo_branches`` (never ``files.commit``), ``None`` when
+    that branch was never registered.
     """
     with engine.connect() as conn:
         with conn.begin():
@@ -644,6 +870,11 @@ def get_file_payload(
                 .join(Repo, File.repo_id == Repo.id)
                 .where(Repo.name == repo, File.path == path, predicate)
             ).scalar_one_or_none()
+            commit = conn.execute(
+                select(RepoBranch.last_indexed_commit)
+                .join(Repo, RepoBranch.repo_id == Repo.id)
+                .where(Repo.name == repo, RepoBranch.branch == resolved_branch)
+            ).scalar_one_or_none()
     found = content is not None
     return {
         "repo": repo,
@@ -651,4 +882,5 @@ def get_file_payload(
         "branch": resolved_branch,
         "content": content,
         "found": found,
+        "commit": commit,
     }

@@ -399,3 +399,30 @@ def test_select_permalink_branch_no_filters_is_none() -> None:
 @pytest.mark.unit
 def test_select_permalink_branch_no_row_branches_is_none() -> None:
     assert service._select_permalink_branch(frozenset({"x"}), ()) is None
+
+
+# --------------------------------------------------------------- commit: filter collectors
+
+
+@pytest.mark.unit
+def test_collect_commit_filters_gathers_prefixes() -> None:
+    assert service._collect_commit_filters(parse("commit:abc1234")) == frozenset({"abc1234"})
+    assert service._collect_commit_filters(parse("commit:aaaaaaa OR commit:bbbbbbb")) == frozenset(
+        {"aaaaaaa", "bbbbbbb"}
+    )
+
+
+@pytest.mark.unit
+def test_collect_branch_filters_is_benign_on_commit_filter() -> None:
+    # A commit: atom carries no branch: value; the branch collector skips it (never raises).
+    assert service._collect_branch_filters(parse("commit:abc1234")) == frozenset()
+
+
+@pytest.mark.unit
+def test_has_content_atom_distinguishes_commit_moods() -> None:
+    # Bare / filter-only commit queries carry no content atom (reverse-lookup mood)...
+    assert service._has_content_atom(parse("commit:abc1234")) is False
+    assert service._has_content_atom(parse("commit:abc1234 file:src/")) is False
+    # ...while a content term (or a sym: atom) flips it to the scoped-search mood.
+    assert service._has_content_atom(parse("commit:abc1234 foo")) is True
+    assert service._has_content_atom(parse("commit:abc1234 sym:Handler")) is True

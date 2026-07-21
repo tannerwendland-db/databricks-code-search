@@ -8,7 +8,7 @@
 // than edit. See docs/runbooks/webui.md for the user-facing asymmetry this produces.
 import type { RepoInfo } from "../api/client";
 
-export type AtomField = "repo" | "file" | "lang" | "sym" | "branch" | "case";
+export type AtomField = "repo" | "file" | "lang" | "sym" | "branch" | "case" | "commit";
 
 export interface Atom {
   /** null means an untyped content atom (a bareword substring). */
@@ -28,6 +28,7 @@ const SUPPORTED_FIELDS: Record<string, AtomField> = {
   lang: "lang",
   sym: "sym",
   branch: "branch",
+  commit: "commit",
 };
 const RESERVED_FIELDS = new Set(["content", "r", "f", "l", "b", "c", "s"]);
 // "case" is a recognized prefix but not a SUPPORTED_FIELDS entry (it carries a query-global

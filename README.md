@@ -28,7 +28,7 @@ under a 5-token limiter sized to the pool.
 
 ## Query language
 
-`search_code` takes a zoekt-style query. Six fields are supported:
+`search_code` takes a zoekt-style query. Seven fields are supported:
 
 | Field | Meaning | Example |
 |---|---|---|
@@ -37,6 +37,7 @@ under a 5-token limiter sized to the pool.
 | `lang:` | language, lowercased; unknown values match nothing | `lang:go` |
 | `sym:` | symbol name (correlated `EXISTS` over `symbols`) | `sym:Handler` |
 | `branch:` | exact branch-membership match (GIN-served `@>`, not a glob/regex) | `branch:main` |
+| `commit:` | git hash (full SHA or ≥7-char hex prefix); scopes to the indexed branch heads at that commit | `commit:abc1234` |
 | `case:` | `yes` or `no`; query-global, last one wins | `case:yes Foo` |
 
 Values may be bare (`repo:acme`), quoted (`repo:"my repo"`), or regex
@@ -60,6 +61,29 @@ include `<name>`, exactly. Which non-default branches are indexed at all is a
 [Configuring what gets indexed](#configuring-what-gets-indexed) and
 [`docs/runbooks/multi-branch.md`](docs/runbooks/multi-branch.md) for the indexer/deploy
 side of multi-branch support.
+
+### Commit scoping
+
+`commit:<hash>` resolves a git hash — a full 40-char SHA or a hex prefix of **≥7 chars**,
+matched git-style against `repo_branches.last_indexed_commit` (never `files.commit`, which
+is write-only and ambiguous under multi-branch dedup) — to the (repo, branch) heads indexed
+at that commit. Non-hex or too-short/too-long values are a query error. It has **two moods**:
+
+- **Reverse lookup** — a bare `commit:<hash>` returns a `resolved` list (each `repo`,
+  `branch`, full `commit`, `index_time`) and an **empty** `files` list: which branch heads
+  are indexed at that commit.
+- **Scoped search** — `commit:<hash> <terms>` runs a normal search scoped to the resolved
+  heads and returns both `files` and the same `resolved` list. Because a commit scope is a
+  branch scope, it opts out of the implicit default-branch conjunct — a hash resolving to a
+  non-default branch (e.g. `release-2.1`) searches that branch, not the default.
+
+A hash that matches no indexed branch returns empty `files` with `commit_not_indexed: true`
+(never a silent unfiltered search). A prefix that collides across several branches/repos
+resolves to **all** of them and scopes to the union. Search results and `get_file` carry the
+resolved head's `commit` when the scope resolves to a specific branch. The `commit` tool param
+on `search_code` is sugar for appending the atom. **v1 is code (`search_code`) only** —
+`semantic_search` does not support `commit:` (a `commit:` in a semantic query is treated as
+plain text); use `branch` there.
 
 Whitespace means AND, `OR` (any case) means OR, and AND binds tighter:
 

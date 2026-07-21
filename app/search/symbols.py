@@ -56,6 +56,7 @@ from app.query.compiler import DEFAULT_ROW_LIMIT, compile_query
 from app.query.parser import (
     And,
     BranchFilter,
+    CommitFilter,
     LangFilter,
     Node,
     Or,
@@ -115,7 +116,15 @@ def _collect_symbol_patterns(node: Node, out: list[str]) -> None:
         case And(children=children) | Or(children=children):
             for child in children:
                 _collect_symbol_patterns(child, out)
-        case Substring() | Regex() | RepoFilter() | PathFilter() | LangFilter() | BranchFilter():
+        case (
+            Substring()
+            | Regex()
+            | RepoFilter()
+            | PathFilter()
+            | LangFilter()
+            | BranchFilter()
+            | CommitFilter()
+        ):
             return
         case _:
             assert_never(node)

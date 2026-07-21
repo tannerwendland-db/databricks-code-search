@@ -38,4 +38,18 @@ describe("ResultsList", () => {
     const markup = renderToStaticMarkup(<ResultsList files={[file({ permalink_branch: null })]} />);
     expect(markup).not.toContain("branch=");
   });
+
+  it("renders the commit badge truncated to 12 chars when present", () => {
+    const markup = renderToStaticMarkup(
+      <ResultsList files={[file({ commit: "abc1234def567890fedcba9876543210" })]} />
+    );
+    expect(markup).toContain("commit-badge");
+    expect(markup).toContain("abc1234def56");
+    expect(markup).not.toContain("abc1234def567890fedcba9876543210");
+  });
+
+  it("omits the commit badge entirely when commit is absent (unscoped search)", () => {
+    const markup = renderToStaticMarkup(<ResultsList files={[file()]} />);
+    expect(markup).not.toContain("commit-badge");
+  });
 });

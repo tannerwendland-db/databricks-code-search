@@ -72,6 +72,9 @@ export interface FileResponse {
   branch: string;
   content: string | null;
   found: boolean;
+  // Indexed commit for `branch`, sourced from repo_branches; present only when the branch
+  // resolves (webui/main.py's get_file_payload), absent otherwise.
+  commit?: string | null;
 }
 
 export function getFile(repo: string, path: string, branch?: string | null): Promise<FileResponse> {

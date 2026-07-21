@@ -18,7 +18,6 @@ import pytest
 
 from app import main, service
 from app.config import Settings
-from app.query.parser import QueryParseError
 from app.search.errors import QueryTooBroadError
 from app.search.grep import FileCursor, FileMatches, GrepResult, LineMatch
 from app.search.symbols import SymbolMatch, SymbolResult
@@ -180,14 +179,14 @@ def test_search_code_payload_matches_golden_shape(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.unit
-def test_search_code_query_parse_error_maps_to_field(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _raise(*_a: object, **_k: object) -> GrepResult:
-        raise QueryParseError("bad query", 0)
-
-    monkeypatch.setattr(service, "grep_search", _raise)
+def test_search_code_query_parse_error_maps_to_field() -> None:
+    # The query is parsed up front (before either leg) so commit resolution can gate execution;
+    # an unparseable query (`case:` takes only yes/no) is folded into the query_parse_error field
+    # exactly as before, without either leg running.
     payload = main._search_code_payload(_FakeEngine([]), _cfg(), "case:maybe", 50)
 
-    assert payload["query_parse_error"] == "bad query"
+    assert payload["query_parse_error"] is not None
+    assert "case:" in payload["query_parse_error"]
     assert payload["files"] == []
     assert payload["file_count"] == 0
     assert payload["match_count"] == 0
@@ -521,7 +520,135 @@ def test_envelope_keys_are_pinned_shape_plus_exactly_two(monkeypatch: pytest.Mon
         "query_parse_error",
     }
     assert pinned <= set(payload)
+    # The commit-search keys (`resolved`/`commit_not_indexed`) are additive and OMITTED for a
+    # query with no commit: atom, so a non-commit query's shape is byte-identical to before --
+    # only the two issue-#31 shape flags are added. (The commit-query shape is pinned separately
+    # by test_envelope_carries_commit_keys_only_for_commit_query.)
     assert set(payload) - pinned == {"no_content_atom", "zero_width_only_atoms"}
+
+
+@pytest.mark.unit
+def test_envelope_carries_commit_keys_only_for_commit_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A commit: query adds EXACTLY `resolved` + `commit_not_indexed` on top of the two shape flags.
+    rc = service.ResolvedCommit(
+        repo="acme/widgets", branch="main", commit="abc1234def", index_time=None
+    )
+    monkeypatch.setattr(service, "resolve_commit_prefix", lambda conn, prefix: [rc])
+
+    payload = main._search_code_payload(_FakeEngine([]), _cfg(), "commit:abc1234", 50)
+
+    extra = set(payload) - {
+        "query",
+        "file_count",
+        "match_count",
+        "duration_ns",
+        "files",
+        "truncated",
+        "truncation_reason",
+        "regex_incompatible",
+        "query_too_broad",
+        "query_parse_error",
+    }
+    assert extra == {"no_content_atom", "zero_width_only_atoms", "resolved", "commit_not_indexed"}
+
+
+@pytest.mark.unit
+def test_search_code_bare_commit_is_reverse_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mood 1 (AC2): bare `commit:<hash>` returns the resolution + empty files; NEITHER leg runs.
+    rc = service.ResolvedCommit(
+        repo="acme/widgets",
+        branch="release-2.1",
+        commit="abc1234def",
+        index_time="2026-07-18T00:00:00+00:00",
+    )
+    monkeypatch.setattr(service, "resolve_commit_prefix", lambda conn, prefix: [rc])
+    monkeypatch.setattr(
+        service, "grep_search", lambda *a, **k: pytest.fail("grep ran on a bare commit lookup")
+    )
+    monkeypatch.setattr(
+        service, "symbol_search", lambda *a, **k: pytest.fail("symbol leg ran on a bare lookup")
+    )
+
+    payload = main._search_code_payload(_FakeEngine([]), _cfg(), "commit:abc1234", 50)
+
+    assert payload["files"] == []
+    assert payload["file_count"] == 0
+    assert payload["resolved"] == [rc.as_payload()]
+    assert payload["commit_not_indexed"] is False
+    assert payload["no_content_atom"] is True  # a bare lookup genuinely has no content atom
+
+
+@pytest.mark.unit
+def test_search_code_commit_file_lang_only_is_still_bare(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `commit:<hash> file:...` carries no content-bearing atom (Substring/Regex/SymbolFilter), so
+    # it stays the reverse-lookup mood in v1: resolution only, no leg execution.
+    rc = service.ResolvedCommit(
+        repo="acme/widgets", branch="main", commit="abc1234", index_time=None
+    )
+    monkeypatch.setattr(service, "resolve_commit_prefix", lambda conn, prefix: [rc])
+    monkeypatch.setattr(
+        service,
+        "grep_search",
+        lambda *a, **k: pytest.fail("grep ran on a filter-only commit query"),
+    )
+
+    payload = main._search_code_payload(_FakeEngine([]), _cfg(), "commit:abc1234 file:src/", 50)
+
+    assert payload["files"] == []
+    assert payload["resolved"] == [rc.as_payload()]
+    assert payload["commit_not_indexed"] is False
+
+
+@pytest.mark.unit
+def test_search_code_commit_no_resolution_flags_not_indexed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # AC5: an unresolvable hash yields empty files + commit_not_indexed, NEVER an unfiltered
+    # search -- the content leg must not run.
+    monkeypatch.setattr(service, "resolve_commit_prefix", lambda conn, prefix: [])
+    monkeypatch.setattr(
+        service, "grep_search", lambda *a, **k: pytest.fail("grep ran on an unresolvable commit")
+    )
+
+    payload = main._search_code_payload(_FakeEngine([]), _cfg(), "commit:deadbee myFunc", 50)
+
+    assert payload["files"] == []
+    assert payload["file_count"] == 0
+    assert payload["resolved"] == []
+    assert payload["commit_not_indexed"] is True
+
+
+@pytest.mark.unit
+def test_search_code_scoped_commit_attaches_resolved_and_commit_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mood 2 (AC3/AC9): `commit:<hash> <terms>` runs the search scoped to the resolved head and
+    # returns both the `resolved` payload and per-file commit metadata sourced from it.
+    rc = service.ResolvedCommit(
+        repo="acme/widgets", branch="release-2.1", commit="abc1234def", index_time=None
+    )
+    monkeypatch.setattr(service, "resolve_commit_prefix", lambda conn, prefix: [rc])
+    file_on_branch = FileMatches(
+        repo_id=7,
+        path="src/handler.go",
+        lang="go",
+        content_sha="deadbeef",
+        branches=("release-2.1",),
+        line_matches=(LineMatch(line_number=3, line_text="// foo", byte_ranges=((3, 6),)),),
+    )
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep(files=(file_on_branch,)))
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
+    engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
+
+    payload = main._search_code_payload(engine, _cfg(), "commit:abc1234 foo", 50)
+
+    assert payload["resolved"] == [rc.as_payload()]
+    assert payload["commit_not_indexed"] is False
+    (entry,) = payload["files"]
+    assert entry["permalink_branch"] == "release-2.1"
+    assert entry["commit"] == "abc1234def"
 
 
 # ---------------------------------------------------------------------- list_repos shape
@@ -620,9 +747,11 @@ def test_list_repos_sets_transaction_local_timeout() -> None:
 
 @pytest.mark.unit
 def test_get_file_hit_shape() -> None:
-    # branch=None: two queries -- the coalesced default_branch lookup, then the content
-    # lookup -- both fed from the fake connection's canned result queue in call order.
-    engine = _FakeEngine([_FakeResult(["main"]), _FakeResult(["package main\n..."])])
+    # branch=None: three queries -- the coalesced default_branch lookup, the content lookup,
+    # then the resolved branch's indexed-commit lookup -- fed from the canned queue in call order.
+    engine = _FakeEngine(
+        [_FakeResult(["main"]), _FakeResult(["package main\n..."]), _FakeResult(["abc1234"])]
+    )
     payload = main._get_file_payload(engine, _cfg(), "acme/widgets", "src/handler.go")
     assert payload == {
         "repo": "acme/widgets",
@@ -630,6 +759,7 @@ def test_get_file_hit_shape() -> None:
         "branch": "main",
         "content": "package main\n...",
         "found": True,
+        "commit": "abc1234",
     }
 
 
@@ -638,16 +768,19 @@ def test_get_file_hit_shape_null_default_branch() -> None:
     # A repo with a NULL default_branch: the SQL-side coalesce(...,'HEAD') already resolves
     # to 'HEAD' server-side, so the fake first result mirrors that (byte-identical resolution
     # to the compiler/migration/semantic sites).
-    engine = _FakeEngine([_FakeResult(["HEAD"]), _FakeResult(["content"])])
+    engine = _FakeEngine(
+        [_FakeResult(["HEAD"]), _FakeResult(["content"]), _FakeResult(["deadbeef"])]
+    )
     payload = main._get_file_payload(engine, _cfg(), "beta/tools", "main.py")
     assert payload["branch"] == "HEAD"
     assert payload["found"] is True
+    assert payload["commit"] == "deadbeef"
 
 
 @pytest.mark.unit
 def test_get_file_hit_shape_explicit_branch() -> None:
-    # An explicit branch skips the default_branch lookup entirely -- one query, one result.
-    engine = _FakeEngine([_FakeResult(["package main\n..."])])
+    # An explicit branch skips the default_branch lookup -- content lookup, then the commit lookup.
+    engine = _FakeEngine([_FakeResult(["package main\n..."]), _FakeResult(["cafe123"])])
     payload = main._get_file_payload(
         engine, _cfg(), "acme/widgets", "src/handler.go", branch="feature/x"
     )
@@ -657,13 +790,15 @@ def test_get_file_hit_shape_explicit_branch() -> None:
         "branch": "feature/x",
         "content": "package main\n...",
         "found": True,
+        "commit": "cafe123",
     }
 
 
 @pytest.mark.unit
 def test_get_file_miss_shape() -> None:
-    # Repo exists (default_branch lookup hits "main") but the path does not.
-    engine = _FakeEngine([_FakeResult(["main"]), _FakeResult([])])  # 2nd scalar_one_or_none -> None
+    # Repo exists (default_branch lookup hits "main") but the path does not; commit lookup also
+    # misses for the resolved branch.
+    engine = _FakeEngine([_FakeResult(["main"]), _FakeResult([]), _FakeResult([])])
     payload = main._get_file_payload(engine, _cfg(), "acme/widgets", "nope.go")
     assert payload == {
         "repo": "acme/widgets",
@@ -671,24 +806,29 @@ def test_get_file_miss_shape() -> None:
         "branch": "main",
         "content": None,
         "found": False,
+        "commit": None,
     }
 
 
 @pytest.mark.unit
 def test_get_file_miss_shape_unknown_repo() -> None:
-    # Repo does not exist at all: the default_branch lookup itself misses -> falls back "HEAD".
-    engine = _FakeEngine([_FakeResult([]), _FakeResult([])])
+    # Repo does not exist at all: the default_branch lookup itself misses -> falls back "HEAD";
+    # content and commit lookups miss too.
+    engine = _FakeEngine([_FakeResult([]), _FakeResult([]), _FakeResult([])])
     payload = main._get_file_payload(engine, _cfg(), "nope/repo", "nope.go")
     assert payload["branch"] == "HEAD"
     assert payload["found"] is False
+    assert payload["commit"] is None
 
 
 @pytest.mark.unit
 def test_get_file_miss_shape_explicit_branch_echoes_requested_branch() -> None:
-    engine = _FakeEngine([_FakeResult([])])
+    # Explicit branch: content lookup misses, commit lookup misses.
+    engine = _FakeEngine([_FakeResult([]), _FakeResult([])])
     payload = main._get_file_payload(engine, _cfg(), "acme/widgets", "nope.go", branch="feature/x")
     assert payload["branch"] == "feature/x"
     assert payload["found"] is False
+    assert payload["commit"] is None
 
 
 # ------------------------------------------------------------------------------- clamp
