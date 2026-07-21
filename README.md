@@ -27,6 +27,12 @@ The server holds one process-scoped SQLAlchemy engine over a 5-connection pool, 
 fresh Lakebase OAuth token on each physical connection. Query work runs off the event loop
 under a 5-token limiter sized to the pool.
 
+The full deployment surface — one bundle carrying the job, the secret scope, and both
+apps, each app reading through its own service principal's least-privilege grant, with
+embeddings flowing through the workspace AI Gateway:
+
+<img src="docs/diagrams/overall-architecture.png" alt="Overall architecture: config.yaml, GitHub, and the secret scope feed the indexing job, which writes to Lakebase Postgres and embeds chunks via the AI Gateway; the MCP server and web UI apps read Lakebase with read-only grants and serve an MCP agent over OAuth and a browser over CAN_USE respectively" width="700">
+
 ## Query language
 
 `search_code` takes a zoekt-style query. Seven fields are supported:
@@ -521,6 +527,8 @@ Run the server locally with `make run` (binds `DATABRICKS_APP_PORT`, else 8000).
   query semantics, the grant-coupling this migration introduces)
 - [`docs/runbooks/semantic-enablement.md`](docs/runbooks/semantic-enablement.md) —
   semantic search (default-on): the preload assumption, opt-out, embeddings, memory notes
+- [`docs/runbooks/indexing-parallelism.md`](docs/runbooks/indexing-parallelism.md) —
+  parallel indexing: worker sizing, skip-if-unchanged, compare-and-set stamping
 - [`docs/runbooks/ci-lakebase.md`](docs/runbooks/ci-lakebase.md) — the integration CI
   gate: ephemeral Lakebase branches, prerequisites
 - [`docs/runbooks/webui.md`](docs/runbooks/webui.md) — the web UI app: auth, grants,
