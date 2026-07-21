@@ -6,7 +6,7 @@ import { useEffect, useSyncExternalStore } from "react";
 
 export type Route =
   | { page: "search"; query: string }
-  | { page: "file"; repo: string; path: string; line: number | null }
+  | { page: "file"; repo: string; path: string; line: number | null; find: string | null }
   | { page: "repos" };
 
 function parseLocation(): Route {
@@ -19,6 +19,7 @@ function parseLocation(): Route {
       repo: params.get("repo") ?? "",
       path: params.get("path") ?? "",
       line: line ? Number(line[1]) : null,
+      find: params.get("find"),
     };
   }
   if (pathname === "/repos") {
