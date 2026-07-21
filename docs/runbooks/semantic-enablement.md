@@ -169,7 +169,9 @@ Notes:
   permission-denied error the first time it tries to write chunks -- not at
   migration time, so this is easy to miss if you only check the migration
   step's exit code. Always pass both `APP_SP_ROLE` and `JOB_WRITER_ROLE` on
-  prod.
+  prod **for the MCP-app grant**; the webui app's grant takes only
+  `APP_SP_ROLE` by design -- it is read-only and never takes a
+  `JOB_WRITER_ROLE` (see the webui re-grant command above).
 - Verify: the app SP can `SELECT` from `chunks` (e.g. via the app's `/ready`
   probe, which already runs a protected-table `SELECT` as the app SP), a
   subsequent indexing run with `semantic_enabled=true` can insert into

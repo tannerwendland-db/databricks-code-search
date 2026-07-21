@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, semanticSearch, type SemanticEnvelope } from "../api/client";
+import { ApiError, getSemanticStatus, semanticSearch, type SemanticEnvelope } from "../api/client";
 import { ChunkCard } from "../components/ChunkCard";
 import { replaceRoute } from "../router";
 
@@ -10,8 +10,12 @@ export function SemanticPage({ initialQuery }: { initialQuery: string }): JSX.El
   const [status, setStatus] = useState<Status>("idle");
   const [envelope, setEnvelope] = useState<SemanticEnvelope | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // null = probe pending/unknown; a failed probe must stay null, not false, so it
+  // doesn't show the disabled banner ahead of an actual disabled envelope.
+  const [enabled, setEnabled] = useState<boolean | null>(null);
   // Guards the mount-time auto-search so StrictMode's double-invoke (dev only) can't double-fire.
   const ranInitial = useRef(false);
+  const ranStatus = useRef(false);
 
   async function runSearch(query: string) {
     if (!query.trim()) return;
@@ -37,6 +41,16 @@ export function SemanticPage({ initialQuery }: { initialQuery: string }): JSX.El
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (ranStatus.current) return;
+    ranStatus.current = true;
+    getSemanticStatus()
+      .then((status) => setEnabled(status.semantic_enabled))
+      .catch(() => {
+        // A failed probe must not show the disabled banner -- leave enabled unknown.
+      });
+  }, []);
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     void runSearch(input);
@@ -48,7 +62,12 @@ export function SemanticPage({ initialQuery }: { initialQuery: string }): JSX.El
   function renderBody(): JSX.Element | null {
     if (status === "loading") return <div className="result-summary">Searching…</div>;
     if (status === "error") return <div className="banner error">{error}</div>;
-    if (!envelope) return null;
+    if (!envelope) {
+      if (enabled === false) {
+        return <div className="banner warn">Semantic search is not enabled for this deployment.</div>;
+      }
+      return null;
+    }
     if (envelope.semantic_enabled === false) {
       return (
         <div className="banner warn">
