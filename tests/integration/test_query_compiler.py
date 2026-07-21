@@ -29,6 +29,7 @@ from app.db.client import create_db_engine
 from app.db.models import Base, File, Repo, Symbol
 from app.query.compiler import compile_query
 from app.query.parser import Node, parse, resolve_case
+from indexer.hashing import content_sha
 
 SCHEMA_PREFIX = "test_qcompiler"
 
@@ -59,8 +60,10 @@ def _unique(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def _insert_repo(conn: Connection, name: str) -> int:
-    return conn.execute(insert(Repo).values(name=name).returning(Repo.id)).scalar_one()
+def _insert_repo(conn: Connection, name: str, *, default_branch: str | None = "main") -> int:
+    return conn.execute(
+        insert(Repo).values(name=name, default_branch=default_branch).returning(Repo.id)
+    ).scalar_one()
 
 
 def _insert_file(
@@ -70,10 +73,21 @@ def _insert_file(
     *,
     lang: str | None,
     content: str | None,
+    branches: list[str] | None = None,
 ) -> int:
+    # branches defaults to ["main"] -- matches the default _insert_repo(default_branch="main")
+    # above, so every existing (pre-0003) test keeps seeing its files via the implicit
+    # default-branch conjunct with no per-call change.
     return conn.execute(
         insert(File)
-        .values(repo_id=repo_id, path=path, lang=lang, content=content)
+        .values(
+            repo_id=repo_id,
+            path=path,
+            lang=lang,
+            content=content,
+            content_sha=content_sha(content),
+            branches=branches if branches is not None else ["main"],
+        )
         .returning(File.id)
     ).scalar_one()
 
@@ -352,6 +366,156 @@ def test_case_sensitive_override_makes_filter_only_query_exact(seeded: Seeded) -
     assert via_resolve_case == overridden
 
 
+# ------------------------------------------------------------------- branch scoping (0003)
+#
+# A dedicated, function-scoped fixture (not the module-scoped `seeded` above): these tests
+# probe multi-branch dedup shapes (divergent content, NULL default_branch) the shared corpus
+# was never built to represent, and mutating it would perturb every other test in this module.
+
+
+class BranchSeeded(NamedTuple):
+    conn: Connection
+    main_repo_id: int  # default_branch="main"
+    master_repo_id: int  # default_branch="master" (different default, proves per-repo coalesce)
+    null_default_repo_id: int  # default_branch IS NULL -> coalesce(...,'HEAD')
+
+
+@pytest.fixture
+def branch_seeded() -> Iterator[BranchSeeded]:
+    schema = _unique(f"{SCHEMA_PREFIX}_branch")
+    engine = create_db_engine()
+    conn = engine.connect()
+    try:
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        conn.execute(text(f"CREATE SCHEMA {schema}"))
+        conn.execute(text(f"SET search_path TO {schema}, public"))
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+        conn.commit()
+
+        Base.metadata.create_all(bind=conn)
+        conn.commit()
+
+        main_id = _insert_repo(conn, "branch/main-default", default_branch="main")
+        master_id = _insert_repo(conn, "branch/master-default", default_branch="master")
+        null_id = _insert_repo(conn, "branch/null-default", default_branch=None)
+
+        # main_id: a path present only on "main" (default) and a path present on BOTH "main"
+        # and "feature" (array-union membership, one row).
+        _insert_file(
+            conn,
+            main_id,
+            "src/default_only.go",
+            lang="go",
+            content="on main only",
+            branches=["main"],
+        )
+        _insert_file(
+            conn,
+            main_id,
+            "src/shared.go",
+            lang="go",
+            content="same content on both branches",
+            branches=["main", "feature"],
+        )
+        # A divergent-content path: "main" and "feature" both touch src/divergent.go but with
+        # DIFFERENT content -> two distinct rows (distinct content_sha), each with its own
+        # single-element branches array (0003 dedup: same repo_id+path, different content_sha).
+        _insert_file(
+            conn, main_id, "src/divergent.go", lang="go", content="main version", branches=["main"]
+        )
+        _insert_file(
+            conn,
+            main_id,
+            "src/divergent.go",
+            lang="go",
+            content="feature version",
+            branches=["feature"],
+        )
+
+        # master_id: default is "master", not "main" -- proves the conjunct is per-repo
+        # correlated, not a hardcoded "main" constant.
+        _insert_file(
+            conn,
+            master_id,
+            "src/master_file.go",
+            lang="go",
+            content="on master",
+            branches=["master"],
+        )
+
+        # null_id: default_branch IS NULL -> the implicit conjunct must coalesce to 'HEAD'.
+        _insert_file(
+            conn, null_id, "src/head_file.go", lang="go", content="on head", branches=["HEAD"]
+        )
+
+        conn.commit()
+        yield BranchSeeded(
+            conn=conn, main_repo_id=main_id, master_repo_id=master_id, null_default_repo_id=null_id
+        )
+    finally:
+        conn.rollback()
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        conn.commit()
+        conn.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_default_query_returns_only_default_branch_rows(branch_seeded: BranchSeeded) -> None:
+    # No branch: atom -> implicit default-branch conjunct. "feature"-only content
+    # (src/divergent.go's "feature version" row) must never surface.
+    paths = _paths(branch_seeded.conn, "repo:^branch/main-default")
+    assert paths == {"src/default_only.go", "src/shared.go", "src/divergent.go"}
+    divergent_rows = _rows(branch_seeded.conn, parse("file:divergent"))
+    assert len(divergent_rows) == 1  # only the "main" content version, not "feature"'s
+
+
+@pytest.mark.integration
+def test_branch_filter_returns_only_named_branch_rows(branch_seeded: BranchSeeded) -> None:
+    # branch:feature opts OUT of the default conjunct entirely: default_only.go (main-only)
+    # is excluded, shared.go (union member) and the "feature version" of divergent.go included.
+    paths = _paths(branch_seeded.conn, "repo:^branch/main-default branch:feature")
+    assert paths == {"src/shared.go", "src/divergent.go"}
+
+
+@pytest.mark.integration
+def test_divergent_content_path_splits_by_content_sha(branch_seeded: BranchSeeded) -> None:
+    # Same (repo_id, path), two distinct content_sha rows -- 0003 dedup keys on content, not
+    # just path. branch: disambiguates which version comes back, and the ids differ.
+    main_ids = {
+        row.id
+        for row in branch_seeded.conn.execute(
+            compile_query(parse("repo:^branch/main-default branch:main file:divergent"))
+        ).all()
+    }
+    feature_ids = {
+        row.id
+        for row in branch_seeded.conn.execute(
+            compile_query(parse("repo:^branch/main-default branch:feature file:divergent"))
+        ).all()
+    }
+    assert len(main_ids) == 1
+    assert len(feature_ids) == 1
+    assert main_ids.isdisjoint(feature_ids)
+
+
+@pytest.mark.integration
+def test_default_conjunct_is_per_repo_not_a_hardcoded_main_constant(
+    branch_seeded: BranchSeeded,
+) -> None:
+    # master_repo's default is "master", not "main" -- the default query must still resolve it,
+    # proving the conjunct is a correlated per-repo coalesce, not a literal "main" check.
+    assert _paths(branch_seeded.conn, "repo:^branch/master-default") == {"src/master_file.go"}
+
+
+@pytest.mark.integration
+def test_null_default_branch_resolves_to_head(branch_seeded: BranchSeeded) -> None:
+    # default_branch IS NULL -> coalesce(repos.default_branch, 'HEAD') = ANY(files.branches)
+    # must still find the row tagged branches=['HEAD'] (byte-identical coalesce to the 0003
+    # backfill and the semantic default leg).
+    assert _paths(branch_seeded.conn, "repo:^branch/null-default") == {"src/head_file.go"}
+
+
 # ------------------------------------------------------------------------ limit / ordering
 
 
@@ -418,8 +582,22 @@ def _uses_index(plan: dict[str, Any], index_name: str) -> bool:
 
 
 @pytest.mark.integration
+@pytest.mark.xfail(
+    strict=False,
+    reason="AC3 pre-0003: was the deterministic proving assertion (isolating the WHERE clause "
+    "left ix_files_content_trgm as the ONLY index able to satisfy the regex). 0003's implicit "
+    "default-branch conjunct (see app/query/compiler.py::_default_branch_conjunct) means "
+    "compile_query() can no longer produce that isolated WHERE clause at all -- every "
+    "default query now ALSO joins repos via a correlated EXISTS, and on this deliberately "
+    "tiny corpus Postgres's cost model prefers a full Index Scan of the (small) "
+    "uq_files_repo_path_sha unique btree + a Filter over the trgm Bitmap Heap Scan, even "
+    "after ANALYZE. Both plans return correct results; only the ACCESS PATH differs, and "
+    "only on tiny corpora -- the same class of small-data artifact already documented for "
+    "the three tests below. See test_branch_filter_query_uses_branches_gin_index for the "
+    "still-deterministic post-0003 GIN-usage proof (an explicit branch: predicate).",
+)
 def test_explain_trigram_extractable_regex_uses_gin_index(seeded: Seeded) -> None:
-    """AC3, the deterministic proving assertion.
+    """AC3, the (pre-0003) deterministic proving assertion.
 
     ``/Handler.*Request/`` has >=1 literal 3-gram. Probing the predicate in isolation
     (``_explain_plan`` strips the ``ORDER BY``/``LIMIT``) with ``enable_seqscan = off``
@@ -431,6 +609,23 @@ def test_explain_trigram_extractable_regex_uses_gin_index(seeded: Seeded) -> Non
     plan = _explain_plan(seeded.conn, parse("/Handler.*Request/"))
     assert _uses_index(plan, "ix_files_content_trgm"), (
         f"expected a Bitmap/Index Scan on ix_files_content_trgm, got plan: {plan}"
+    )
+
+
+@pytest.mark.integration
+def test_branch_filter_query_uses_branches_gin_index(seeded: Seeded) -> None:
+    """The post-0003 replacement for AC3's determinism guarantee.
+
+    An explicit ``branch:`` predicate lowers to the GIN-served ``@>`` operator (Option C1) and
+    opts OUT of the implicit default conjunct (see ``_has_branch_filter``), so this is the one
+    query shape where the WHERE clause is still exactly what the compiler renders -- no extra
+    correlated join. ``ix_files_branches_gin`` is the only index able to satisfy
+    ``branches @> ARRAY[...]``, so with ``enable_seqscan = off`` Postgres must reach for it,
+    independent of row count.
+    """
+    plan = _explain_plan(seeded.conn, parse("branch:main"))
+    assert _uses_index(plan, "ix_files_branches_gin"), (
+        f"expected a Bitmap/Index Scan on ix_files_branches_gin, got plan: {plan}"
     )
 
 

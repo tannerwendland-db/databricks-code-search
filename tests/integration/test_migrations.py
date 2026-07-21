@@ -31,6 +31,7 @@ from sqlalchemy.exc import ProgrammingError
 from app.db.client import create_db_engine
 from app.db.grants import build_app_grants, build_job_grants
 from app.db.models import Base
+from indexer.hashing import content_sha
 
 _MIGRATE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "migrate.py"
 
@@ -95,7 +96,7 @@ def test_schema_fidelity(migrated: Migrated) -> None:
         .scalars()
         .all()
     )
-    assert {"repos", "files", "symbols"} <= set(tables)
+    assert {"repos", "files", "symbols", "repo_branches"} <= set(tables)
 
     rows = conn.execute(
         text("SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = :s"),
@@ -106,6 +107,8 @@ def test_schema_fidelity(migrated: Migrated) -> None:
         assert idx in by_name, f"missing index {idx}"
         assert "USING gin" in by_name[idx]
         assert "gin_trgm_ops" in by_name[idx]
+    assert "ix_files_branches_gin" in by_name
+    assert "USING gin" in by_name["ix_files_branches_gin"]
 
     fk_count = conn.execute(
         text(
@@ -121,6 +124,9 @@ def test_schema_fidelity(migrated: Migrated) -> None:
     ).scalar()
     assert fk_count and fk_count >= 1
 
+    # Post-0003: the path-uniqueness key is (repo_id, path, content_sha), not
+    # (repo_id, path) -- multi-branch content dedup allows one path to have
+    # multiple content versions.
     unique_cols = (
         conn.execute(
             text(
@@ -130,14 +136,14 @@ def test_schema_fidelity(migrated: Migrated) -> None:
                 "  AND tc.table_schema = kcu.table_schema "
                 "WHERE tc.constraint_type = 'UNIQUE' "
                 "  AND tc.table_schema = :s AND tc.table_name = 'files' "
-                "  AND tc.constraint_name = 'uq_files_repo_id_path'"
+                "  AND tc.constraint_name = 'uq_files_repo_path_sha'"
             ),
             {"s": schema},
         )
         .scalars()
         .all()
     )
-    assert {"repo_id", "path"} <= set(unique_cols)
+    assert {"repo_id", "path", "content_sha"} <= set(unique_cols)
 
 
 @pytest.mark.integration
@@ -452,3 +458,178 @@ def test_migrate_apply_grants_missing_role_raises(monkeypatch: pytest.MonkeyPatc
         conn.commit()
         conn.close()
         engine.dispose()
+
+
+@pytest.mark.integration
+def test_0003_backfill_and_shape() -> None:
+    """Seed at 0002 (pre-multi-branch), upgrade to 0003: backfill matches content_sha().
+
+    Covers a repo with a ``default_branch`` and one with ``NULL`` (exercising the
+    ``coalesce(default_branch,'HEAD')`` path), a NULL-content file, and multibyte
+    UTF-8 + trailing-newline content -- the same case set the Phase-0 parity gate
+    covers, now proven through the actual migration SQL rather than a bare query.
+    """
+    schema = _unique("test_0003_backfill")
+    engine = create_db_engine()
+    conn = engine.connect()
+    try:
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        conn.execute(text(f"CREATE SCHEMA {schema}"))
+        conn.execute(text(f"SET search_path TO {schema}, public"))
+        conn.commit()
+
+        config = Config("alembic.ini")
+        config.attributes["connection"] = conn
+        config.attributes["version_table_schema"] = schema
+
+        command.upgrade(config, "0002")
+        conn.commit()
+
+        conn.execute(
+            text(
+                "INSERT INTO repos (name, default_branch, last_indexed_commit, "
+                "last_indexed_at, index_semantics_version) VALUES "
+                "('with-default', 'main', 'deadbeef', now(), 1), "
+                "('no-default', NULL, NULL, NULL, NULL)"
+            )
+        )
+        conn.commit()
+        repo_ids = dict(conn.execute(text("SELECT name, id FROM repos")).all())
+
+        conn.execute(
+            text(
+                "INSERT INTO files (repo_id, path, content, commit) VALUES "
+                "(:r1, 'a.py', 'héllo→λ', 'deadbeef'), "
+                "(:r1, 'b.py', NULL, 'deadbeef'), "
+                "(:r2, 'c.py', 'trailing' || chr(10), NULL)"
+            ),
+            {"r1": repo_ids["with-default"], "r2": repo_ids["no-default"]},
+        )
+        conn.commit()
+
+        command.upgrade(config, "0003")
+        conn.commit()
+
+        rows = conn.execute(
+            text("SELECT path, content, content_sha, branches FROM files ORDER BY path")
+        ).all()
+        by_path = {r.path: r for r in rows}
+
+        assert by_path["a.py"].content_sha == content_sha("héllo→λ")
+        assert by_path["a.py"].branches == ["main"]
+        assert by_path["b.py"].content_sha == content_sha(None)
+        assert by_path["b.py"].branches == ["main"]
+        assert by_path["c.py"].content_sha == content_sha("trailing\n")
+        assert by_path["c.py"].branches == ["HEAD"]
+
+        branch_by_repo = dict(
+            conn.execute(
+                text(
+                    "SELECT r.name, rb.branch FROM repo_branches rb "
+                    "JOIN repos r ON r.id = rb.repo_id"
+                )
+            ).all()
+        )
+        assert branch_by_repo["with-default"] == "main"
+        assert branch_by_repo["no-default"] == "HEAD"
+
+        stamp = conn.execute(
+            text(
+                "SELECT rb.last_indexed_commit, rb.index_semantics_version FROM repo_branches rb "
+                "JOIN repos r ON r.id = rb.repo_id WHERE r.name = 'with-default'"
+            )
+        ).one()
+        assert stamp.last_indexed_commit == "deadbeef"
+        assert stamp.index_semantics_version == 1
+    finally:
+        conn.rollback()
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        conn.commit()
+        conn.close()
+        engine.dispose()
+
+
+@pytest.mark.integration
+def test_0003_downgrade_clean_on_single_branch_data(migrated: Migrated) -> None:
+    """A path with exactly one content version downgrades cleanly to 0002 shape."""
+    conn, schema = migrated.conn, migrated.schema
+
+    conn.execute(text("INSERT INTO repos (name, default_branch) VALUES ('r1', 'main')"))
+    conn.commit()
+    repo_id = conn.execute(text("SELECT id FROM repos WHERE name = 'r1'")).scalar()
+    conn.execute(
+        text(
+            "INSERT INTO files (repo_id, path, content, commit, content_sha, branches) VALUES "
+            "(:r, 'a.py', 'x', 'sha1', :sha, ARRAY['main'])"
+        ),
+        {"r": repo_id, "sha": content_sha("x")},
+    )
+    conn.commit()
+
+    command.downgrade(migrated.config, "0002")
+    conn.commit()
+
+    cols = (
+        conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = :s AND table_name = 'files'"
+            ),
+            {"s": schema},
+        )
+        .scalars()
+        .all()
+    )
+    assert "content_sha" not in cols
+    assert "branches" not in cols
+
+    tables = (
+        conn.execute(
+            text("SELECT table_name FROM information_schema.tables WHERE table_schema = :s"),
+            {"s": schema},
+        )
+        .scalars()
+        .all()
+    )
+    assert "repo_branches" not in tables
+
+    unique_cols = (
+        conn.execute(
+            text(
+                "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+                "JOIN information_schema.key_column_usage kcu "
+                "  ON tc.constraint_name = kcu.constraint_name "
+                "  AND tc.table_schema = kcu.table_schema "
+                "WHERE tc.constraint_type = 'UNIQUE' "
+                "  AND tc.table_schema = :s AND tc.table_name = 'files' "
+                "  AND tc.constraint_name = 'uq_files_repo_id_path'"
+            ),
+            {"s": schema},
+        )
+        .scalars()
+        .all()
+    )
+    assert {"repo_id", "path"} <= set(unique_cols)
+
+
+@pytest.mark.integration
+def test_0003_downgrade_blocked_by_multi_branch_data(migrated: Migrated) -> None:
+    """Two content versions of one path (real multi-branch divergence) block downgrade."""
+    conn = migrated.conn
+
+    conn.execute(text("INSERT INTO repos (name, default_branch) VALUES ('r1', 'main')"))
+    conn.commit()
+    repo_id = conn.execute(text("SELECT id FROM repos WHERE name = 'r1'")).scalar()
+    conn.execute(
+        text(
+            "INSERT INTO files (repo_id, path, content, commit, content_sha, branches) VALUES "
+            "(:r, 'a.py', 'x', 'sha1', :sha1, ARRAY['main']), "
+            "(:r, 'a.py', 'y', 'sha2', :sha2, ARRAY['feature'])"
+        ),
+        {"r": repo_id, "sha1": content_sha("x"), "sha2": content_sha("y")},
+    )
+    conn.commit()
+
+    with pytest.raises(RuntimeError, match="multi-branch data present"):
+        command.downgrade(migrated.config, "0002")
+    conn.rollback()

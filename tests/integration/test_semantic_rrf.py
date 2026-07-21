@@ -17,13 +17,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
-from sqlalchemy import Connection, insert, text
+from sqlalchemy import Connection, insert, select, text
 
 from app.config import SEMANTIC_EMBEDDING_DIM
 from app.db.client import create_db_engine
 from app.db.models import Base, File, Repo
 from app.search.semantic import build_hybrid_rrf_sql, format_vector_literal
 from indexer.chunk_store import write_chunks
+from indexer.hashing import content_sha
 
 SCHEMA = "test_semantic_rrf"
 
@@ -86,7 +87,14 @@ def seeded() -> Iterator[Connection]:
         ).scalar_one()
         file_id = conn.execute(
             insert(File)
-            .values(repo_id=repo_id, path="src/auth.py", lang="python", content="stub")
+            .values(
+                repo_id=repo_id,
+                path="src/auth.py",
+                lang="python",
+                content="stub",
+                content_sha=content_sha("stub"),
+                branches=["main"],
+            )
             .returning(File.id)
         ).scalar_one()
 
@@ -158,3 +166,136 @@ def test_ann_leg_uses_hnsw_index_not_seqscan_sort(seeded: Connection) -> None:
 
     assert "ix_chunks_embedding_hnsw" in plan, f"ANN leg did not use the HNSW index:\n{plan}"
     assert "Index Scan using ix_chunks_embedding_hnsw" in plan, plan
+
+
+# ------------------------------------------------------------------- branch scoping (0003)
+
+
+@pytest.mark.integration
+def test_rrf_default_query_excludes_feature_only_chunk(seeded: Connection) -> None:
+    # A second file, present ONLY on "feature" (not the repo's default "main"), with a chunk
+    # aligned to its own distinctive query vector/term. The default (branch=None) query must
+    # never surface it -- D1's inner-subquery join+filter, proven end to end.
+    repo_id = seeded.execute(select(Repo.id).where(Repo.name == "acme/widgets")).scalar_one()
+    feature_file_id = seeded.execute(
+        insert(File)
+        .values(
+            repo_id=repo_id,
+            path="src/feature.py",
+            lang="python",
+            content="stub",
+            content_sha=content_sha("feature-stub"),
+            branches=["feature"],
+        )
+        .returning(File.id)
+    ).scalar_one()
+    write_chunks(
+        seeded,
+        file_id=feature_file_id,
+        chunks=[(0, "gizmo widget only on the feature branch", _vec({2: 1.0}))],
+    )
+    seeded.commit()
+
+    params = _params(topk=5, limit=10)
+    params["qvec"] = format_vector_literal(_vec({2: 1.0}))
+    params["qtext"] = "gizmo"
+
+    default_rows = seeded.execute(build_hybrid_rrf_sql("standin"), params).all()
+    assert all(r.content != "gizmo widget only on the feature branch" for r in default_rows)
+
+
+def _seed_null_default_head_chunk(conn: Connection) -> None:
+    """A repo whose ``default_branch`` IS NULL, with one chunk tagged ``branches=['HEAD']``.
+
+    Shared by the two NULL-default tests below. Mirrors the compiler's
+    ``test_null_default_branch_resolves_to_head`` and the MCP ``get_file`` gamma/nullbranch
+    case (plan test-plan item (b): the ``coalesce(...,'HEAD')`` reachability proof must hold
+    at all three default-branch sites -- compiler, semantic, ``get_file``).
+    """
+    null_repo_id = conn.execute(
+        insert(Repo).values(name="gamma/nullbranch", default_branch=None).returning(Repo.id)
+    ).scalar_one()
+    head_file_id = conn.execute(
+        insert(File)
+        .values(
+            repo_id=null_repo_id,
+            path="src/head.py",
+            lang="python",
+            content="stub",
+            content_sha=content_sha("head-stub"),
+            branches=["HEAD"],
+        )
+        .returning(File.id)
+    ).scalar_one()
+    write_chunks(
+        conn,
+        file_id=head_file_id,
+        chunks=[(0, "widget gizmo only reachable on head", _vec({3: 1.0}))],
+    )
+    conn.commit()
+
+
+def _null_default_params() -> dict[str, object]:
+    params = _params(topk=5, limit=10)
+    params["qvec"] = format_vector_literal(_vec({3: 1.0}))
+    params["qtext"] = "widget"
+    return params
+
+
+@pytest.mark.integration
+def test_rrf_default_query_resolves_null_default_branch_to_head(seeded: Connection) -> None:
+    # coalesce(r.default_branch, 'HEAD') = ANY(f.branches): a NULL default_branch must still
+    # resolve to 'HEAD' and match a chunk tagged branches=['HEAD'], with no branch= given.
+    _seed_null_default_head_chunk(seeded)
+
+    default_rows = seeded.execute(build_hybrid_rrf_sql("standin"), _null_default_params()).all()
+    contents = [r.content for r in default_rows]
+    assert "widget gizmo only reachable on head" in contents
+
+
+@pytest.mark.integration
+def test_rrf_explicit_branch_head_reaches_null_default_repo_chunk(seeded: Connection) -> None:
+    # Symmetry: an explicit branch="HEAD" (the GIN-served f.branches @> ARRAY[:branch] path)
+    # must reach the same chunk as the default coalesce path above.
+    _seed_null_default_head_chunk(seeded)
+
+    params = _null_default_params()
+    params["branch"] = "HEAD"
+    branch_rows = seeded.execute(build_hybrid_rrf_sql("standin", branch="HEAD"), params).all()
+    contents = [r.content for r in branch_rows]
+    assert "widget gizmo only reachable on head" in contents
+
+
+@pytest.mark.integration
+def test_rrf_branch_filter_reaches_feature_only_chunk(seeded: Connection) -> None:
+    repo_id = seeded.execute(select(Repo.id).where(Repo.name == "acme/widgets")).scalar_one()
+    feature_file_id = seeded.execute(
+        insert(File)
+        .values(
+            repo_id=repo_id,
+            path="src/feature.py",
+            lang="python",
+            content="stub",
+            content_sha=content_sha("feature-stub"),
+            branches=["feature"],
+        )
+        .returning(File.id)
+    ).scalar_one()
+    write_chunks(
+        seeded,
+        file_id=feature_file_id,
+        chunks=[(0, "gizmo widget only on the feature branch", _vec({2: 1.0}))],
+    )
+    seeded.commit()
+
+    params = _params(topk=5, limit=10)
+    params["qvec"] = format_vector_literal(_vec({2: 1.0}))
+    params["qtext"] = "gizmo"
+    params["branch"] = "feature"
+
+    branch_rows = seeded.execute(build_hybrid_rrf_sql("standin", branch="feature"), params).all()
+    contents = [r.content for r in branch_rows]
+    assert "gizmo widget only on the feature branch" in contents
+    # The pre-existing "main"-only chunks (A/B/C) never carry "feature" membership, so an
+    # exact branch: match excludes them even though they exist in the corpus.
+    assert "user authentication and login" not in contents

@@ -7,33 +7,40 @@ read, enumeration, filtering, dedup, ceiling -- before the first tarball is
 fetched, so a bad config exits non-zero having indexed nothing and without ever
 opening a database connection.
 
-Orchestrates, per resolved repo: resolve HEAD -> download the tarball by that
-immutable SHA -> extract -> parse text files -> extract symbols -> atomic upsert +
-mark-and-sweep via :func:`indexer.store.index_repo`. Each repo is isolated; the
-process exits non-zero if any repo fails.
+Orchestrates, per resolved repo: resolve the default branch's HEAD -> resolve the
+repo's concrete branch list (config globs, plan Option A1) -> for each branch,
+SEQUENTIALLY: resolve its HEAD SHA -> download the tarball by that immutable SHA
+-> extract -> parse text files -> extract symbols -> atomic upsert + mark-and-sweep
+via :func:`indexer.store.index_repo`. Branches within one repo are sequential
+(never concurrent) -- that is the invariant that keeps ``store.py``'s per-branch
+sweep sound without an advisory lock. Each BRANCH is isolated: one branch's
+failure or CAS conflict does not stop its repo's other branches from being
+attempted, and the process exits non-zero if any branch fails.
 
 Repos are worked on concurrently by a bounded ``ThreadPoolExecutor`` sized by
 ``config.index_concurrency`` (clamped by
-:func:`indexer.repo_config.effective_workers`). A repo whose stored
-``(last_indexed_commit, index_semantics_version)`` already equals its current
-HEAD SHA and :data:`app.db.models.INDEX_SEMANTICS_VERSION` is skipped before its
-tarball is fetched. Because each repo's stamp is written inside that repo's own
-transaction, a run killed halfway resumes on the next run with exactly the
-remainder -- no checkpoint file, no resume flag. To force a re-index, clear the
-provenance: ``UPDATE repos SET index_semantics_version = NULL`` (see
-``docs/runbooks/indexing-parallelism.md``, which also names which identity holds
-``UPDATE`` on ``repos``).
+:func:`indexer.repo_config.effective_workers`) -- the pool's unit of work is one
+REPO (all its branches, sequentially), not one branch. A branch whose stored
+``repo_branches`` ``(last_indexed_commit, index_semantics_version)`` already
+equals its current HEAD SHA and :data:`app.db.models.INDEX_SEMANTICS_VERSION` is
+skipped before its tarball is fetched. Because each branch's stamp is written
+inside that branch's own transaction, a run killed halfway resumes on the next
+run with exactly the remainder -- no checkpoint file, no resume flag. To force a
+re-index, clear the provenance: ``UPDATE repo_branches SET
+index_semantics_version = NULL`` (see ``docs/runbooks/indexing-parallelism.md``,
+which also names which identity holds ``UPDATE`` on ``repo_branches``).
 
 The engine's pool is DERIVED from that worker count rather than a constant, and
-each worker checks local disk headroom before downloading anything -- a
-shortfall fails that repo alone rather than the run.
+each branch's fetch checks local disk headroom before downloading anything -- a
+shortfall fails that branch alone rather than the run or even the rest of that
+repo's branches.
 
 That check is a PRE-FLIGHT SANITY CHECK, not admission control: it reserves
 nothing, so N workers can each observe enough free space and then collectively
 exhaust the disk. It reliably catches the steady-state case (disk already low
-when a repo starts) and converts it into a legible per-repo error; it does NOT
-bound the transient case, where an aggregate ENOSPC still surfaces as the opaque
-``tarfile`` failure. Sizing ``index_concurrency`` to the disk is the real
+when a branch starts) and converts it into a legible per-branch error; it does
+NOT bound the transient case, where an aggregate ENOSPC still surfaces as the
+opaque ``tarfile`` failure. Sizing ``index_concurrency`` to the disk is the real
 control -- see ``docs/runbooks/indexing-parallelism.md``.
 
 When ``cfg.semantic_enabled`` (issue #14), each repo's files are also chunked and
@@ -60,15 +67,17 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from sqlalchemy import select
 
 from app.config import Settings, get_settings
 from app.db.client import create_db_engine
-from app.db.models import INDEX_SEMANTICS_VERSION, Repo
+from app.db.models import INDEX_SEMANTICS_VERSION, Repo, RepoBranch
+from indexer.branches import resolve_branches
 from indexer.chunk_store import write_chunks
 from indexer.embed import EmbeddingCountMismatchError, EmbedFn, get_embedder
 from indexer.fetch import (
@@ -76,16 +85,35 @@ from indexer.fetch import (
     assert_disk_headroom,
     download_tarball,
     extract_tarball,
+    list_branches,
+    resolve_branch_head,
     resolve_ref,
 )
 from indexer.languages import Chunk, IndexCounts, ParsedFile
 from indexer.parse import iter_chunks, iter_source_files
 from indexer.repo_config import RepoConfig, effective_workers, load_config, normalize_repo
-from indexer.resolve import MAX_REPOS, resolve_repos
+from indexer.resolve import MAX_REPOS, RepoEntry, resolve_repos
 from indexer.store import ChunkWriter, StaleIndexError, index_repo
 from indexer.symbols import extract_symbols
 
 logger = logging.getLogger("indexer.job")
+
+
+@dataclass(frozen=True)
+class BranchOutcome:
+    """The result of attempting one branch within a repo's sequential loop.
+
+    ``counts`` is ``None`` for every status except ``"indexed"``. Classified the
+    SAME way ``run()``'s drain loop used to classify a whole repo's future
+    (``StaleIndexError`` -> ``"conflict"``, any other exception -> ``"failed"``)
+    -- but now caught INSIDE the per-branch loop so one branch's failure never
+    stops its repo's other branches from being attempted.
+    """
+
+    branch: str
+    status: Literal["indexed", "skipped", "conflict", "failed"]
+    counts: IndexCounts | None = None
+
 
 # Per-repo log context. Set by _index_one so that records emitted by
 # indexer.fetch / indexer.store / indexer.embed -- which carry no repo name of
@@ -276,68 +304,42 @@ def run(
                     index_fn=index_fn,
                     cfg=cfg,
                     embed_fn=embed_fn,
-                    stamp=stamps.get(entry.casefold(), (None, None)),
+                    stamps=stamps,
                 ): entry
                 for entry in entries
             }
             # as_completed drains on the MAIN thread, so all four counters are
-            # single-threaded increments -- no lock, and fut.result() re-raises
-            # the worker's exception here, preserving per-repo isolation exactly.
+            # single-threaded increments -- no lock. Per-branch failures/conflicts
+            # are now classified INSIDE _index_one_inner's loop (so one bad branch
+            # never stops its repo's other branches) -- fut.result() only raises
+            # for a failure BEFORE that loop starts (resolving the default HEAD,
+            # listing branches): those remain repo-level and are still caught here.
             for fut in as_completed(futures):
                 entry = futures[fut]
                 try:
-                    counts = fut.result()
-                except StaleIndexError as exc:
-                    # The repos row changed under this worker, so its whole
-                    # transaction rolled back and THIS REPO IS NOT INDEXED.
-                    #
-                    # NO KNOWN WRITER CAN REACH THIS TODAY -- do not go hunting
-                    # for one. index_repo's statement 1 is an ON CONFLICT DO
-                    # UPDATE that takes the repos row lock and holds it to
-                    # commit, so any competing writer either blocks until this
-                    # worker finishes (its write lands after the CAS) or commits
-                    # first (and statement 1's RETURNING then reads ITS value as
-                    # the baseline). Measured both ways against real Postgres:
-                    # a concurrent `UPDATE ... SET index_semantics_version=NULL`
-                    # blocked for the worker's whole transaction and the CAS
-                    # matched. An earlier revision of this comment named that
-                    # force-reindex as the "realistic trigger" -- that was wrong.
-                    #
-                    # It is excluded from the exit code because it is an
-                    # invariant assertion, not an expected failure path (see
-                    # StaleIndexError in indexer/store.py). It earns its keep by
-                    # failing loudly if for_each_task sharding lands or someone
-                    # raises max_concurrent_runs in resources/job.yml -- either
-                    # of which removes the single-writer property above.
-                    #
-                    # Should it ever fire, the repo self-heals: the next run
-                    # sees a stamp it does not match and re-indexes it.
-                    #
-                    # Logged WITHOUT a traceback: a rolled-back transaction is
-                    # not a crash, and the stack adds nothing an operator needs.
-                    conflicts += 1
-                    logger.warning(
-                        "index conflict for %s (rolled back, not indexed; "
-                        "will re-index next run): %s",
-                        entry,
-                        exc,
-                    )
-                    continue
+                    outcomes = fut.result()
                 except Exception:
                     failures += 1
-                    logger.exception("failed to index %s", entry)
+                    logger.exception("failed to index %s", entry.name)
                     continue
-                if counts is None:
-                    skipped += 1
-                else:
-                    ok += 1
-                    logger.info(
-                        "indexed %s: files=%d symbols=%d swept=%d",
-                        entry,
-                        counts.files,
-                        counts.symbols,
-                        counts.swept,
-                    )
+                for outcome in outcomes:
+                    if outcome.status == "skipped":
+                        skipped += 1
+                    elif outcome.status == "conflict":
+                        conflicts += 1
+                    elif outcome.status == "failed":
+                        failures += 1
+                    else:
+                        ok += 1
+                        assert outcome.counts is not None
+                        logger.info(
+                            "indexed %s@%s: files=%d symbols=%d swept=%d",
+                            entry.name,
+                            outcome.branch,
+                            outcome.counts.files,
+                            outcome.counts.symbols,
+                            outcome.counts.swept,
+                        )
     finally:
         if owns_http:
             http_client.close()
@@ -345,7 +347,8 @@ def run(
             engine.dispose()
 
     logger.info(
-        "indexing complete: %d ok, %d skipped, %d conflicts, %d failed (of %d) in %.1fs",
+        "indexing complete: %d branch(es) ok, %d skipped, %d conflicts, %d failed "
+        "(across %d repos) in %.1fs",
         ok,
         skipped,
         conflicts,
@@ -354,42 +357,63 @@ def run(
         time.monotonic() - run_started,
     )
     # Conflicts do NOT fail the run because they SELF-HEAL -- the stamp that
-    # displaced them makes the next run re-index those repos unconditionally.
-    # Note this trades a paging signal for one run of staleness on those repos;
-    # the WARNING above is the record. It is NOT that the work was redundant.
+    # displaced them makes the next run re-index that branch unconditionally.
+    # Note this trades a paging signal for one run of staleness on that branch;
+    # the WARNING logged at the conflict site is the record. It is NOT that the
+    # work was redundant.
     return 1 if failures else 0
 
 
-def _read_stamps(engine: Any, entries: list[str]) -> dict[str, tuple[str | None, int | None]]:
-    """Read ``(last_indexed_commit, index_semantics_version)`` for ``entries``.
+def _read_stamps(
+    engine: Any, entries: list[RepoEntry]
+) -> dict[tuple[str, str], tuple[str | None, int | None]]:
+    """Read every existing ``repo_branches`` ``(last_indexed_commit, index_semantics_version)``
+    for ``entries``, keyed by ``(name.casefold(), branch)``.
 
-    One query for the whole run. ``.where(Repo.name.in_(entries))`` is
+    One query for the whole run, BEFORE branch resolution. ``.where(Repo.name.in_(names))`` is
     load-bearing, not decoration: without it the result set is bounded by the
-    *table*, and ``repos`` accumulates a row for every repo ever configured
-    (dropping a repo from ``config.yaml`` never reaps it). With the filter the
-    read is bounded by ``MAX_REPOS``.
+    *table*, and ``repo_branches`` accumulates rows for every repo/branch ever
+    configured (dropping a repo -- or narrowing its globs -- from ``config.yaml``
+    never reaps them). With the filter the read is bounded by ``MAX_REPOS`` times
+    each repo's branch count.
+
+    Branch resolution needs a GitHub API call (``indexer.fetch.list_branches``),
+    which cannot happen before fan-out without serializing every repo's branch
+    listing on the main thread -- so this reads ALL of a repo's existing
+    ``repo_branches`` rows regardless of which branches this run will actually
+    resolve, and each worker looks up ``stamps.get((name, branch))`` per branch
+    as it discovers them. A branch that has never been indexed simply misses,
+    which degrades to "index it": safe in the correct direction.
 
     Keyed on ``casefold()`` purely as belt-and-braces. Note it is INERT for the
-    matches this query can actually return: ``Repo.name.in_(entries)`` is
+    matches this query can actually return: ``Repo.name.in_(names)`` is
     case-SENSITIVE, so any row that comes back already equals its entry exactly,
-    and ``r.name.casefold() == entry.casefold()`` iff ``r.name == entry``. It
-    costs nothing and would save us if that filter ever became case-insensitive.
+    and ``r.name.casefold() == entry.name.casefold()`` iff ``r.name ==
+    entry.name``. It costs nothing and would save us if that filter ever became
+    case-insensitive.
 
     What genuinely matters here is that ``normalize_repo`` is NOT hoisted to the
     main thread to build these keys: it raises a bare ``ValueError``, and called
-    outside every per-repo handler it would break run()'s isolation contract.
-    It stays inside ``_index_one``. A key that fails to match simply yields no
-    stamp, which degrades to "index it": safe in the correct direction.
+    outside every per-repo handler it would break run()'s isolation contract. It
+    stays inside ``_index_one``.
     """
+    names = [entry.name for entry in entries]
     with engine.connect() as conn:
         rows = conn.execute(
             select(
                 Repo.name,
-                Repo.last_indexed_commit,
-                Repo.index_semantics_version,
-            ).where(Repo.name.in_(entries))
+                RepoBranch.branch,
+                RepoBranch.last_indexed_commit,
+                RepoBranch.index_semantics_version,
+            )
+            .select_from(RepoBranch)
+            .join(Repo, Repo.id == RepoBranch.repo_id)
+            .where(Repo.name.in_(names))
         ).all()
-    return {r.name.casefold(): (r.last_indexed_commit, r.index_semantics_version) for r in rows}
+    return {
+        (r.name.casefold(), r.branch): (r.last_indexed_commit, r.index_semantics_version)
+        for r in rows
+    }
 
 
 def _precompute_chunk_writer(
@@ -439,30 +463,29 @@ def _precompute_chunk_writer(
 
 
 def _index_one(
-    entry: str,
+    entry: RepoEntry,
     *,
     http_client: httpx.Client,
     engine: Any,
     index_fn: Callable[..., IndexCounts],
     cfg: Settings,
     embed_fn: EmbedFn | None,
-    stamp: tuple[str | None, int | None] = (None, None),
-) -> IndexCounts | None:
-    """Run the full fetch -> parse -> symbols -> store pipeline for one repo entry.
+    stamps: dict[tuple[str, str], tuple[str | None, int | None]],
+) -> list[BranchOutcome]:
+    """Run the full fetch -> parse -> symbols -> store pipeline for every branch of one repo.
 
-    Returns ``None`` when the repo is already indexed at HEAD under the current
-    semantics version -- no tarball, no temp dir, no connection, no disk.
-
-    ``stamp`` is this repo's ``(last_indexed_commit, index_semantics_version)``
-    as of the pre-fan-out read. A ``None`` version means the provenance of the
-    stored index is unknown, so the repo is always re-indexed.
+    Branches are processed SEQUENTIALLY (plan Option A1) so no concurrent writer
+    for this repo ever exists -- the invariant ``store.py``'s per-branch sweep
+    depends on. Each branch's outcome is independent (see :class:`BranchOutcome`):
+    one branch failing or conflicting does not stop this repo's other branches
+    from being attempted.
     """
     started = time.monotonic()
     # Set FIRST, before normalize_repo, so a malformed entry's ValueError still
     # logs under the right name. The finally reset is mandatory: ThreadPoolExecutor
     # reuses worker threads and does NOT reset the context between tasks, so
     # without it a failure raised before the next set() logs under this repo.
-    token = _repo_ctx.set(entry)
+    token = _repo_ctx.set(entry.name)
     try:
         return _index_one_inner(
             entry,
@@ -472,14 +495,14 @@ def _index_one(
             index_fn=index_fn,
             cfg=cfg,
             embed_fn=embed_fn,
-            stamp=stamp,
+            stamps=stamps,
         )
     finally:
         _repo_ctx.reset(token)
 
 
 def _index_one_inner(
-    entry: str,
+    entry: RepoEntry,
     *,
     started: float,
     http_client: httpx.Client,
@@ -487,72 +510,46 @@ def _index_one_inner(
     index_fn: Callable[..., IndexCounts],
     cfg: Settings,
     embed_fn: EmbedFn | None,
-    stamp: tuple[str | None, int | None],
-) -> IndexCounts | None:
-    """The body of :func:`_index_one`, run with the repo log context already set."""
-    name = normalize_repo(entry)
+    stamps: dict[tuple[str, str], tuple[str | None, int | None]],
+) -> list[BranchOutcome]:
+    """The body of :func:`_index_one`, run with the repo log context already set.
+
+    Resolving the default HEAD and the concrete branch list happens ONCE, here,
+    outside the per-branch loop; a failure at this stage (a 404 repo, a rate
+    limit) fails the whole repo and propagates to ``run()``'s repo-level
+    handler. Everything from that point on is per-branch and never raises out
+    of this function (see :func:`_index_one_branch`).
+    """
+    name = normalize_repo(entry.name)
     org, repo = name.split("/", 1)
-    default_branch, head_sha = resolve_ref(http_client, org, repo)
+    default_branch, default_head_sha = resolve_ref(http_client, org, repo)
 
-    # The skip seam: after the immutable HEAD SHA is known, before anything is
-    # downloaded. Both halves must match -- a stored NULL version never does.
-    if stamp == (head_sha, INDEX_SEMANTICS_VERSION):
-        logger.info(
-            "skipped %s: already indexed at %s (semantics v%d) in %.2fs",
+    # The common case -- no branches: configured -- needs no GitHub branches API
+    # call at all: resolve_branches ignores all_branches entirely when globs is
+    # empty (it always resolves to just [default_branch]).
+    all_branches = list_branches(http_client, org, repo) if entry.branch_globs else []
+    concrete_branches = resolve_branches(
+        default_branch, all_branches, sorted(entry.branch_globs), repo=name
+    )
+
+    outcomes = [
+        _index_one_branch(
             name,
-            head_sha,
-            INDEX_SEMANTICS_VERSION,
-            time.monotonic() - started,
+            org=org,
+            repo=repo,
+            branch=branch,
+            is_default=(branch == default_branch),
+            default_head_sha=default_head_sha,
+            http_client=http_client,
+            engine=engine,
+            index_fn=index_fn,
+            cfg=cfg,
+            embed_fn=embed_fn,
+            stamps=stamps,
+            started=started,
         )
-        return None
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-        # Checked INSIDE the temp dir (so it measures the filesystem actually
-        # being written to) and BEFORE the first byte is downloaded. Raising
-        # here lands in run()'s per-repo isolation handler, so an over-committed
-        # disk costs this repo and not the run.
-        assert_disk_headroom(tmp_path, repo=name)
-        tar_path = download_tarball(http_client, org, repo, head_sha, tmp_path)
-        root = extract_tarball(tar_path, tmp_path / "extracted")
-
-        chunk_writer: ChunkWriter | None = None
-        if cfg.semantic_enabled and embed_fn is not None:
-            # Chunking/embedding needs the full file list up front -- unlike the
-            # lazy items generator below, it cannot stream through index_repo's
-            # open transaction (A4).
-            files = list(iter_source_files(root))
-            try:
-                chunk_writer = _precompute_chunk_writer(
-                    files, embed_fn, cfg.semantic_max_chunks_per_repo
-                )
-            except Exception:
-                # The semantic layer is ADDITIVE: a chunk-ceiling breach, a downed embedder,
-                # or a dim/count mismatch must not cost this repo its core index. Letting it
-                # propagate would skip files/symbols AND the mark-and-sweep, silently leaving
-                # the repo stale -- a worse outcome than stale chunks. Chunks catch up on the
-                # next successful run; the failure is logged with a traceback, never swallowed
-                # silently.
-                logger.warning(
-                    "semantic precompute failed for %s; indexing core corpus without chunks",
-                    name,
-                    exc_info=True,
-                )
-                chunk_writer = None
-            items = ((pf, extract_symbols(pf)) for pf in files)
-        else:
-            # Lazy generator: files stream through the open transaction (bounded memory).
-            items = ((pf, extract_symbols(pf)) for pf in iter_source_files(root))
-
-        with engine.connect() as conn:
-            counts = index_fn(
-                conn,
-                name=name,
-                default_branch=default_branch,
-                head_sha=head_sha,
-                items=items,
-                chunk_writer=chunk_writer,
-            )
+        for branch in concrete_branches
+    ]
 
     # Measured here, where the clock already runs, rather than as an IndexCounts
     # field: IndexCounts is a frozen dataclass compared by value in existing
@@ -560,7 +557,131 @@ def _index_one_inner(
     # This is the instrument the "throughput measured on the first production
     # run" promise depends on -- without it that promise is unfalsifiable.
     logger.info("finished %s in %.2fs", name, time.monotonic() - started)
-    return counts
+    return outcomes
+
+
+def _index_one_branch(
+    name: str,
+    *,
+    org: str,
+    repo: str,
+    branch: str,
+    is_default: bool,
+    default_head_sha: str,
+    http_client: httpx.Client,
+    engine: Any,
+    index_fn: Callable[..., IndexCounts],
+    cfg: Settings,
+    embed_fn: EmbedFn | None,
+    stamps: dict[tuple[str, str], tuple[str | None, int | None]],
+    started: float,
+) -> BranchOutcome:
+    """Fetch, parse, and store ONE branch. Never raises -- every failure is classified.
+
+    ``stamps`` is looked up as ``(name.casefold(), branch)`` -- a miss (a branch
+    never indexed before) degrades to "index it", safe in the correct direction.
+    A stored ``None`` version means the provenance of the stored index is
+    unknown, so the branch is always re-indexed.
+    """
+    try:
+        head_sha = (
+            default_head_sha if is_default else resolve_branch_head(http_client, org, repo, branch)
+        )
+
+        # The skip seam: after the immutable HEAD SHA is known, before anything
+        # is downloaded. Both halves must match -- a stored NULL version never does.
+        stamp = stamps.get((name.casefold(), branch), (None, None))
+        if stamp == (head_sha, INDEX_SEMANTICS_VERSION):
+            logger.info(
+                "skipped %s@%s: already indexed at %s (semantics v%d) in %.2fs",
+                name,
+                branch,
+                head_sha,
+                INDEX_SEMANTICS_VERSION,
+                time.monotonic() - started,
+            )
+            return BranchOutcome(branch=branch, status="skipped")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Checked INSIDE the temp dir (so it measures the filesystem actually
+            # being written to) and BEFORE the first byte is downloaded. Raising
+            # here is caught below, costing this branch alone.
+            assert_disk_headroom(tmp_path, repo=f"{name}@{branch}")
+            tar_path = download_tarball(http_client, org, repo, head_sha, tmp_path)
+            root = extract_tarball(tar_path, tmp_path / "extracted")
+
+            chunk_writer: ChunkWriter | None = None
+            if cfg.semantic_enabled and embed_fn is not None:
+                # Chunking/embedding needs the full file list up front -- unlike
+                # the lazy items generator below, it cannot stream through
+                # index_repo's open transaction (A4).
+                files = list(iter_source_files(root))
+                try:
+                    chunk_writer = _precompute_chunk_writer(
+                        files, embed_fn, cfg.semantic_max_chunks_per_repo
+                    )
+                except Exception:
+                    # The semantic layer is ADDITIVE: a chunk-ceiling breach, a downed embedder,
+                    # or a dim/count mismatch must not cost this branch its core index. Letting
+                    # it propagate would skip files/symbols AND the mark-and-sweep, silently
+                    # leaving the branch stale -- worse than stale chunks. Chunks catch up on
+                    # the next successful run; the failure is logged with a traceback, never
+                    # swallowed silently.
+                    logger.warning(
+                        "semantic precompute failed for %s@%s; indexing core corpus without chunks",
+                        name,
+                        branch,
+                        exc_info=True,
+                    )
+                    chunk_writer = None
+                items = ((pf, extract_symbols(pf)) for pf in files)
+            else:
+                # Lazy generator: files stream through the open transaction (bounded memory).
+                items = ((pf, extract_symbols(pf)) for pf in iter_source_files(root))
+
+            with engine.connect() as conn:
+                counts = index_fn(
+                    conn,
+                    name=name,
+                    branch=branch,
+                    is_default=is_default,
+                    head_sha=head_sha,
+                    items=items,
+                    chunk_writer=chunk_writer,
+                )
+        return BranchOutcome(branch=branch, status="indexed", counts=counts)
+    except StaleIndexError as exc:
+        # The repo_branches row for THIS branch changed under this worker, so
+        # its whole transaction rolled back and THIS BRANCH IS NOT INDEXED.
+        #
+        # NO KNOWN WRITER CAN REACH THIS TODAY -- do not go hunting for one.
+        # index_repo's statements take row locks held to commit, so any
+        # competing writer either blocks until this worker finishes or commits
+        # first and this worker's baseline read then reads its value.
+        #
+        # It is excluded from the exit code because it is an invariant
+        # assertion, not an expected failure path (see StaleIndexError in
+        # indexer/store.py). It earns its keep by failing loudly if
+        # for_each_task sharding lands, per-branch parallel fan-out (plan
+        # Option A2) ships, or someone raises max_concurrent_runs -- any of
+        # which removes the single-writer-per-repo property above.
+        #
+        # Should it ever fire, the branch self-heals: the next run sees a
+        # stamp it does not match and re-indexes it.
+        #
+        # Logged WITHOUT a traceback: a rolled-back transaction is not a
+        # crash, and the stack adds nothing an operator needs.
+        logger.warning(
+            "index conflict for %s@%s (rolled back, not indexed; will re-index next run): %s",
+            name,
+            branch,
+            exc,
+        )
+        return BranchOutcome(branch=branch, status="conflict")
+    except Exception:
+        logger.exception("failed to index %s@%s", name, branch)
+        return BranchOutcome(branch=branch, status="failed")
 
 
 def _positive_int(raw: str) -> int:

@@ -56,17 +56,19 @@ SEMANTIC_RRF_K = 60
 SEMANTIC_TOP_K = 200
 
 # The ANN distance fragment is identical on both backends (pgvector `<=>` == lakebase_ann
-# `<=>`, cosine distance, ASC = nearer). Only the BM25 fragment differs.
-_ANN_METRIC = "embedding <=> (:qvec)::vector"
+# `<=>`, cosine distance, ASC = nearer). Only the BM25 fragment differs. Both are qualified
+# `c.` (0003, Option D1): the inner subquery's FROM now joins chunks/files/repos for branch
+# scoping, and qualification there is load-bearing -- see _leg_cte.
+_ANN_METRIC = "c.embedding <=> (:qvec)::vector"
 
 # Per-backend BM25 score fragment, each shaped so ORDER BY metric ASC ranks best-first:
 # lakebase_bm25 `<@>`/to_bm25query scores are negative (more-negative = better); the pgvector
 # stand-in negates ts_rank_cd (higher relevance = better) so the wrapper's ORDER BY is shared.
 _BM_METRIC = {
     "lakebase": (
-        "ts <@> to_bm25query(to_tsvector('english', :qtext), 'ix_chunks_ts_bm25'::regclass)"
+        "c.ts <@> to_bm25query(to_tsvector('english', :qtext), 'ix_chunks_ts_bm25'::regclass)"
     ),
-    "standin": "- ts_rank_cd(ts, plainto_tsquery('english', :qtext))",
+    "standin": "- ts_rank_cd(c.ts, plainto_tsquery('english', :qtext))",
 }
 
 
@@ -84,11 +86,35 @@ def format_vector_literal(vec: list[float]) -> str:
     return "[" + ",".join(repr(x) for x in vec) + "]"
 
 
-def _leg_cte(name: str, metric: str, *, where: str = "") -> str:
+def _branch_predicate(branch: str | None) -> str:
+    """The branch-scoping WHERE fragment shared by both legs' inner subquery (0003, Option D1).
+
+    ``branch=None`` (default-branch): a correlated match against each chunk's own repo --
+    ``coalesce(r.default_branch, 'HEAD') = ANY(f.branches)`` -- byte-identical to the query
+    compiler's implicit default conjunct and the ``0003`` backfill/``get_file`` sites (a NULL
+    ``default_branch`` resolves to ``'HEAD'`` everywhere). Explicit ``branch``: the GIN-served
+    exact-membership operator, ``f.branches @> ARRAY[:branch]``.
+    """
+    if branch is None:
+        return "coalesce(r.default_branch, 'HEAD') = ANY(f.branches)"
+    return "f.branches @> ARRAY[:branch]"
+
+
+def _leg_cte(name: str, metric: str, branch_pred: str, *, extra_where: str = "") -> str:
     """One rank CTE: rank the top ``:topk`` rows by ``metric`` (ASC = best) as 1..topk.
 
     The ``ORDER BY metric LIMIT :topk`` lives in an INNER subquery so the ANN / BM25 index is
     usable; ``row_number()`` then ranks only those candidates (never a full-table sort).
+    ``branch_pred`` (see :func:`_branch_predicate`) is always present -- it lives in the INNER
+    subquery's ``WHERE``, never the ``ORDER BY``, so it never costs the index a second sort key.
+
+    Qualification scope is critical (0003): the INNER subquery joins ``chunks c`` to
+    ``files f`` / ``repos r`` for branch scoping, so ``metric``/``extra_where`` must be
+    ``c.``-qualified (``c.embedding``, ``c.ts``) and the inner projection is ``SELECT c.id AS
+    id``. The OUTER ``row_number()`` window (this CTE's own ``SELECT``) stays BARE -- ``id``,
+    never ``c.id`` -- because it selects from the derived table ``s``, whose only columns are
+    ``id``/``metric``; ``c`` is out of scope there and referencing it raises "missing
+    FROM-clause entry for table c".
 
     Determinism (issues #9/#13) is enforced ONLY where it does not cost the index:
 
@@ -109,32 +135,40 @@ def _leg_cte(name: str, metric: str, *, where: str = "") -> str:
     (``ts_rank_cd``) is never index-ordered, so its plan is seq-scan + sort either way. The
     unit test therefore asserts the SQL SHAPE (no inner tiebreak) rather than a plan.
     """
+    where = f" WHERE {branch_pred}"
+    if extra_where:
+        where += f" AND {extra_where}"
     return (
         f"{name} AS ("
         f"SELECT id, row_number() OVER (ORDER BY metric, id) AS rank "
-        f"FROM (SELECT id, {metric} AS metric FROM chunks{where} "
+        f"FROM (SELECT c.id AS id, {metric} AS metric "
+        f"FROM chunks c JOIN files f ON f.id = c.file_id JOIN repos r ON r.id = f.repo_id"
+        f"{where} "
         f"ORDER BY {metric} LIMIT :topk) s)"
     )
 
 
-def build_hybrid_rrf_sql(backend: str) -> TextClause:
+def build_hybrid_rrf_sql(backend: str, branch: str | None = None) -> TextClause:
     """Build the backend-selected hybrid RRF query as a parameterized :class:`TextClause`.
 
     Binds ``:qvec`` (bracketed vector literal), ``:qtext`` (raw query string), ``:topk``
-    (per-leg candidate cap), ``:k`` (RRF constant), ``:lim`` (result cap). The shared fusion
-    wrapper is identical for ``lakebase`` and ``standin``; only the BM25 leg fragment differs
-    (see :data:`_BM_METRIC`). Rows come back as ``(id, repo, path, chunk_index, content,
-    rrf_score)`` after joining the fused ids back to ``chunks -> files -> repos``.
+    (per-leg candidate cap), ``:k`` (RRF constant), ``:lim`` (result cap), and -- only when
+    ``branch`` is given -- ``:branch`` (exact branch name; see :func:`_branch_predicate`). The
+    shared fusion wrapper is identical for ``lakebase`` and ``standin``; only the BM25 leg
+    fragment differs (see :data:`_BM_METRIC`). Rows come back as ``(id, repo, path,
+    chunk_index, content, rrf_score)`` after joining the fused ids back to
+    ``chunks -> files -> repos``.
     """
     if backend not in _BM_METRIC:
         raise ValueError(f"unknown semantic backend {backend!r}; expected 'lakebase' or 'standin'")
+    branch_pred = _branch_predicate(branch)
     # ANN leg skips NULL embeddings: `embedding <=> :qvec` is NULL for them and Postgres
     # sorts NULLs LAST in ASC, so they stay hidden until the corpus is smaller than :topk --
     # at which point they would take real ranks and earn real RRF credit for not matching.
-    ann = _leg_cte("ann", _ANN_METRIC, where=" WHERE embedding IS NOT NULL")
+    ann = _leg_cte("ann", _ANN_METRIC, branch_pred, extra_where="c.embedding IS NOT NULL")
     # No inner tiebreak on this leg either -- see _leg_cte: a second sort key after the
     # `<@>` ORDER BY-operator key would make the lakebase_bm25 index path unavailable.
-    bm = _leg_cte("bm", _BM_METRIC[backend])
+    bm = _leg_cte("bm", _BM_METRIC[backend], branch_pred)
     sql = (
         f"WITH {ann}, {bm}, "
         "fused AS ("
@@ -233,7 +267,7 @@ def _semantic_not_migrated_payload(query: str, backend: str) -> dict[str, Any]:
 
 
 def _semantic_search_payload(
-    engine: Engine, cfg: Settings, query: str, limit: int
+    engine: Engine, cfg: Settings, query: str, limit: int, branch: str | None = None
 ) -> dict[str, Any]:
     """Embed ``query``, run the hybrid RRF search, and shape the ranked-chunk envelope.
 
@@ -243,6 +277,12 @@ def _semantic_search_payload(
     build the embedder, embed the query text OUTSIDE the DB transaction (no network call
     inside ``conn.begin()``), then run the backend-selected RRF query under a transaction-local
     ``statement_timeout`` and join the fused ids back to ``chunks -> files -> repos``.
+
+    ``branch`` (0003, Option D1): ``None`` scopes each leg to its chunk's own repo's default
+    branch (the same ``coalesce(...,'HEAD')`` as the query compiler); given, it scopes to an
+    exact ``branch:`` match instead. Threaded straight to :func:`build_hybrid_rrf_sql` -- this
+    module takes natural-language queries, not zoekt grammar, so branch scoping is a separate
+    parameter rather than a ``branch:`` atom.
 
     Result envelope (V1): ``{"query", "semantic_enabled": True, "backend", "results":
     [{"repo", "file", "chunk_index", "content", "rrf_score"}], "count"}``. ``chunks`` has no
@@ -268,18 +308,20 @@ def _semantic_search_payload(
 
     # Embed OUTSIDE the connection/transaction: no network call inside the lock window.
     qvec = get_embedder(cfg)([query])[0]
-    params = {
+    params: dict[str, Any] = {
         "qvec": format_vector_literal(qvec),
         "qtext": query,
         "topk": SEMANTIC_TOP_K,
         "k": SEMANTIC_RRF_K,
         "lim": limit,
     }
+    if branch is not None:
+        params["branch"] = branch
 
     with engine.connect() as conn:
         with conn.begin():
             conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}")
-            rows = conn.execute(build_hybrid_rrf_sql(backend), params).all()
+            rows = conn.execute(build_hybrid_rrf_sql(backend, branch), params).all()
 
     results = [
         {

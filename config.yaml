@@ -32,6 +32,17 @@ connections:
     # repos:
     #   - otherorg/specific-repo
 
+    # Extra branches to index PER REPO, on top of the default branch (always
+    # included regardless of match). Glob patterns (fnmatchcase, exact-name
+    # match, NOT a regex) against each repo's branch list. Empty (the
+    # default) means default-branch-only — no behavior change for an
+    # unmodified config, and the GitHub branches API is not even called.
+    # Soft-capped at 20 branches per repo (default-first, then alphabetical);
+    # see docs/runbooks/multi-branch.md.
+    # branches:
+    #   - "main"
+    #   - "release/*"
+
     # `exclude` filters ONLY repos discovered via `orgs` / `users`.
     # exclude:
     #   forks: true       # default true — forks duplicate their upstream

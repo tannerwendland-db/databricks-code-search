@@ -55,6 +55,7 @@ from app.db.models import File, Symbol
 from app.query.compiler import DEFAULT_ROW_LIMIT, compile_query
 from app.query.parser import (
     And,
+    BranchFilter,
     LangFilter,
     Node,
     Or,
@@ -82,6 +83,8 @@ class SymbolMatch:
     repo_id: int
     path: str
     lang: str | None
+    content_sha: str
+    branches: tuple[str, ...]
     name: str
     kind: str | None
     start_line: int | None  # 1-based first line of the definition
@@ -92,7 +95,7 @@ class SymbolResult:
     """Symbol-search result. ``truncated`` flags a row-capped page; ``no_symbol_atom`` marks a
     query that carried no ``sym:`` atom (empty by construction, not by absence of matches)."""
 
-    symbols: tuple[SymbolMatch, ...]  # in (repo_id, path, start_line, name, id) order
+    symbols: tuple[SymbolMatch, ...]  # in (repo_id, path, content_sha, start_line, name, id) order
     truncated: bool  # candidate-file cap OR symbol-row cap tripped
     truncation_reason: str | None  # "row_cap" | None
     no_symbol_atom: bool
@@ -112,7 +115,7 @@ def _collect_symbol_patterns(node: Node, out: list[str]) -> None:
         case And(children=children) | Or(children=children):
             for child in children:
                 _collect_symbol_patterns(child, out)
-        case Substring() | Regex() | RepoFilter() | PathFilter() | LangFilter():
+        case Substring() | Regex() | RepoFilter() | PathFilter() | LangFilter() | BranchFilter():
             return
         case _:
             assert_never(node)
@@ -138,13 +141,22 @@ def _build_symbol_select(
             File.repo_id,
             File.path,
             File.lang,
+            File.content_sha,
+            File.branches,
             Symbol.name,
             Symbol.kind,
             Symbol.start_line,
         )
         .join(File, Symbol.file_id == File.id)
         .where(Symbol.file_id.in_(file_ids), name_filter)
-        .order_by(File.repo_id, File.path, Symbol.start_line, Symbol.name, Symbol.id)
+        .order_by(
+            File.repo_id,
+            File.path,
+            File.content_sha,
+            Symbol.start_line,
+            Symbol.name,
+            Symbol.id,
+        )
         .limit(row_limit)
     )
 
@@ -211,6 +223,8 @@ def symbol_search(
             repo_id=row.repo_id,
             path=row.path,
             lang=row.lang,
+            content_sha=row.content_sha,
+            branches=tuple(row.branches),
             name=row.name,
             kind=row.kind,
             start_line=row.start_line,

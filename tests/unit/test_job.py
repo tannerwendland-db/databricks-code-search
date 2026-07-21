@@ -101,10 +101,14 @@ class _GitHub:
         enumerations: dict[str, list[dict[str, Any]]] | None = None,
         missing: set[str] | None = None,
         files: dict[str, bytes] | None = None,
+        branches: dict[str, list[str]] | None = None,
     ) -> None:
         self.enumerations = enumerations or {}
         self.missing = missing or set()
         self.files = files
+        # full_name -> branch names, for the /branches endpoint. A repo not
+        # listed here answers with an empty branch list.
+        self.branches = branches or {}
         # Appended to from worker threads under fan-out; list.append is atomic,
         # so the contents are safe even though the ORDER is not deterministic.
         self.paths: list[str] = []
@@ -131,7 +135,15 @@ class _GitHub:
                     return httpx.Response(404)
                 return httpx.Response(200, json={"default_branch": "main"})
             if parts[3] == "commits":
-                return httpx.Response(200, json={"sha": f"sha_{repo}"})
+                # "main" keeps the pre-multi-branch sha_{repo} shape every
+                # existing test relies on; any other ref gets a distinguishable
+                # sha so per-branch tests can tell which ref was resolved.
+                ref = parts[4] if len(parts) > 4 else "main"
+                sha = f"sha_{repo}" if ref == "main" else f"sha_{repo}_{ref}"
+                return httpx.Response(200, json={"sha": sha})
+            if parts[3] == "branches":
+                names = self.branches.get(f"{org}/{repo}", [])
+                return httpx.Response(200, json=[{"name": n} for n in names])
             if parts[3] == "tarball":
                 return httpx.Response(200, content=_tarball(f"{org}-{repo}-shashas", self.files))
         return httpx.Response(404)
@@ -155,9 +167,10 @@ def _config(*, index_concurrency: int | None = None, **connection: Any) -> RepoC
 
 
 class _StampRow(NamedTuple):
-    """One row of the pre-fan-out stamp SELECT."""
+    """One row of the pre-fan-out stamp SELECT (repo_branches JOIN repos)."""
 
     name: str
+    branch: str
     last_indexed_commit: str | None
     index_semantics_version: int | None
 
@@ -189,17 +202,22 @@ class _FakeConn:
 class _FakeEngine:
     """Fake Engine that also answers ``_read_stamps``' batched SELECT.
 
-    ``stamps`` maps a repo name to its stored
-    ``(last_indexed_commit, index_semantics_version)``; an absent repo is simply
-    not returned, which is the "never indexed" shape.
+    ``stamps`` maps a ``(repo name, branch)`` pair to its stored
+    ``(last_indexed_commit, index_semantics_version)``; an absent pair is simply
+    not returned, which is the "never indexed" shape. Every test repo here
+    resolves to just its "main" branch (no ``branches:`` configured), so a
+    stamp is keyed ``(name, "main")``.
     """
 
-    def __init__(self, stamps: dict[str, tuple[str | None, int | None]] | None = None) -> None:
+    def __init__(
+        self, stamps: dict[tuple[str, str], tuple[str | None, int | None]] | None = None
+    ) -> None:
         self.disposed = False
         self.disposed_at: float | None = None
         self.executed: list[Any] = []
         self.stamp_rows = [
-            _StampRow(name, commit, version) for name, (commit, version) in (stamps or {}).items()
+            _StampRow(name, branch, commit, version)
+            for (name, branch), (commit, version) in (stamps or {}).items()
         ]
 
     def connect(self) -> _FakeConn:
@@ -221,7 +239,8 @@ class _RecordingIndex:
         conn: Any,
         *,
         name: str,
-        default_branch: Any,
+        branch: str,
+        is_default: bool,
         head_sha: str,
         items: Any,
         chunk_writer: Any = None,
@@ -698,7 +717,9 @@ def test_main_installs_the_repo_filter_on_every_root_handler(
 def test_run_skips_a_repo_already_indexed_at_head() -> None:
     """The skip happens BEFORE the tarball: no download, no index_fn call."""
     idx = _RecordingIndex()
-    engine = _FakeEngine(stamps={"acme/widgets": ("sha_widgets", INDEX_SEMANTICS_VERSION)})
+    engine = _FakeEngine(
+        stamps={("acme/widgets", "main"): ("sha_widgets", INDEX_SEMANTICS_VERSION)}
+    )
     github = _GitHub()
     code = _run(_config(repos=["acme/widgets"]), idx, github=github, engine=engine)
     assert code == 0
@@ -714,7 +735,9 @@ def test_run_reindexes_when_the_semantics_version_is_stale() -> None:
     must re-index a corpus whose commits have not moved.
     """
     idx = _RecordingIndex()
-    engine = _FakeEngine(stamps={"acme/widgets": ("sha_widgets", INDEX_SEMANTICS_VERSION - 1)})
+    engine = _FakeEngine(
+        stamps={("acme/widgets", "main"): ("sha_widgets", INDEX_SEMANTICS_VERSION - 1)}
+    )
     code = _run(_config(repos=["acme/widgets"]), idx, engine=engine)
     assert code == 0
     assert idx.calls == ["acme/widgets"]
@@ -729,7 +752,7 @@ def test_run_reindexes_when_the_semantics_version_is_null() -> None:
     no ``--force_reindex`` flag.
     """
     idx = _RecordingIndex()
-    engine = _FakeEngine(stamps={"acme/widgets": ("sha_widgets", None)})
+    engine = _FakeEngine(stamps={("acme/widgets", "main"): ("sha_widgets", None)})
     code = _run(_config(repos=["acme/widgets"]), idx, engine=engine)
     assert code == 0
     assert idx.calls == ["acme/widgets"]
@@ -738,7 +761,7 @@ def test_run_reindexes_when_the_semantics_version_is_null() -> None:
 @pytest.mark.unit
 def test_run_reindexes_when_head_has_moved() -> None:
     idx = _RecordingIndex()
-    engine = _FakeEngine(stamps={"acme/widgets": ("sha_old", INDEX_SEMANTICS_VERSION)})
+    engine = _FakeEngine(stamps={("acme/widgets", "main"): ("sha_old", INDEX_SEMANTICS_VERSION)})
     code = _run(_config(repos=["acme/widgets"]), idx, engine=engine)
     assert code == 0
     assert idx.calls == ["acme/widgets"]
@@ -748,7 +771,7 @@ def test_run_reindexes_when_head_has_moved() -> None:
 def test_run_indexes_a_repo_with_no_stamp_at_all() -> None:
     """An unknown repo gets stamp (None, None), which can never equal HEAD."""
     idx = _RecordingIndex()
-    engine = _FakeEngine(stamps={"other/thing": ("sha_widgets", INDEX_SEMANTICS_VERSION)})
+    engine = _FakeEngine(stamps={("other/thing", "main"): ("sha_widgets", INDEX_SEMANTICS_VERSION)})
     code = _run(_config(repos=["acme/widgets"]), idx, engine=engine)
     assert code == 0
     assert idx.calls == ["acme/widgets"]
@@ -768,8 +791,93 @@ def test_stamp_read_is_a_single_query_bounded_by_an_in_clause() -> None:
     assert len(engine.executed) == 1
     sql = str(engine.executed[0])
     assert "repos.name IN " in sql
-    assert "repos.last_indexed_commit" in sql
-    assert "repos.index_semantics_version" in sql
+    assert "repo_branches.last_indexed_commit" in sql
+    assert "repo_branches.index_semantics_version" in sql
+
+
+# --- Multi-branch: branches: globs fan out into >1 branch per repo ---------
+
+
+@pytest.mark.unit
+def test_no_branches_configured_never_calls_the_branches_endpoint() -> None:
+    """The common case costs no extra GitHub call -- resolve_branches ignores it anyway."""
+    idx = _RecordingIndex()
+    github = _GitHub()
+    code = _run(_config(repos=["acme/widgets"]), idx, github=github)
+    assert code == 0
+    assert not any(p.endswith("/branches") for p in github.paths)
+    assert idx.calls == ["acme/widgets"]
+
+
+@pytest.mark.unit
+def test_branches_glob_resolves_and_indexes_every_matching_branch() -> None:
+    """A connection with branches: configured indexes every matching branch, sequentially."""
+    idx = _RecordingIndex()
+    github = _GitHub(branches={"acme/widgets": ["main", "release-1", "release-2", "dev"]})
+    code = _run(_config(repos=["acme/widgets"], branches=["release-*"]), idx, github=github)
+    assert code == 0
+    # main (always included) + the two release-* matches; "dev" is not indexed.
+    assert idx.calls == ["acme/widgets", "acme/widgets", "acme/widgets"]
+    assert len([p for p in github.paths if p.endswith("/branches")]) == 1
+
+
+@pytest.mark.unit
+def test_per_branch_skip_is_independent_within_one_repo() -> None:
+    """One branch already at HEAD is skipped; a divergent branch in the same repo is indexed."""
+    idx = _RecordingIndex()
+    github = _GitHub(branches={"acme/widgets": ["main", "feature"]})
+    # commits/main -> sha_widgets, commits/feature -> sha_widgets_feature (see _GitHub).
+    engine = _FakeEngine(
+        stamps={("acme/widgets", "feature"): ("sha_widgets_feature", INDEX_SEMANTICS_VERSION)}
+    )
+    code = _run(
+        _config(repos=["acme/widgets"], branches=["feature"]), idx, github=github, engine=engine
+    )
+    assert code == 0
+    # "feature" was already current and skipped; only "main" reached index_fn.
+    assert idx.calls == ["acme/widgets"]
+
+
+@pytest.mark.unit
+def test_one_branchs_conflict_does_not_stop_the_repos_other_branches(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A StaleIndexError on one branch is isolated -- the repo's other branches still run."""
+    github = _GitHub(branches={"acme/widgets": ["main", "feature"]})
+    seen: list[str] = []
+
+    def _index(conn: Any, *, name: str, branch: str, **_: Any) -> IndexCounts:
+        seen.append(branch)
+        if branch == "main":
+            raise StaleIndexError(f"repo_branches row for {name}@{branch} changed")
+        return IndexCounts(files=1, symbols=0, swept=0)
+
+    with caplog.at_level(logging.INFO, logger="indexer.job"):
+        code = _run(_config(repos=["acme/widgets"], branches=["feature"]), _index, github=github)
+
+    assert code == 0  # a conflict alone does not fail the run
+    # Both branches were attempted -- "main" conflicting did not skip "feature".
+    assert sorted(seen) == ["feature", "main"]
+    assert "index conflict for acme/widgets@main" in caplog.text
+    assert "indexed acme/widgets@feature" in caplog.text
+
+
+@pytest.mark.unit
+def test_one_branchs_failure_does_not_stop_the_repos_other_branches() -> None:
+    """Same isolation for a generic failure, not just a StaleIndexError conflict."""
+    github = _GitHub(branches={"acme/widgets": ["main", "feature"]})
+    seen: list[str] = []
+
+    def _index(conn: Any, *, name: str, branch: str, **_: Any) -> IndexCounts:
+        seen.append(branch)
+        if branch == "main":
+            raise RuntimeError("boom")
+        return IndexCounts(files=1, symbols=0, swept=0)
+
+    code = _run(_config(repos=["acme/widgets"], branches=["feature"]), _index, github=github)
+
+    assert code == 1  # a genuine failure DOES fail the run
+    assert sorted(seen) == ["feature", "main"]
 
 
 # --- Step 5: bounded fan-out ------------------------------------------------
@@ -874,7 +982,9 @@ def test_mixed_run_accounts_for_every_repo(caplog: pytest.LogCaptureFixture) -> 
             raise StaleIndexError(f"repos row for {name} changed mid-transaction")
         return IndexCounts(files=1, symbols=0, swept=0)
 
-    engine = _FakeEngine(stamps={"acme/skipped": ("sha_skipped", INDEX_SEMANTICS_VERSION)})
+    engine = _FakeEngine(
+        stamps={("acme/skipped", "main"): ("sha_skipped", INDEX_SEMANTICS_VERSION)}
+    )
     github = _GitHub(missing={"acme/broken"})
     entries = ["acme/widgets", "acme/skipped", "acme/conflicted", "acme/broken"]
     with caplog.at_level(logging.INFO, logger="indexer.job"):
@@ -884,7 +994,7 @@ def test_mixed_run_accounts_for_every_repo(caplog: pytest.LogCaptureFixture) -> 
     completion = [r for r in caplog.records if "indexing complete" in r.getMessage()]
     assert len(completion) == 1
     message = completion[0].getMessage()
-    assert "1 ok, 1 skipped, 1 conflicts, 1 failed (of 4)" in message
+    assert "1 branch(es) ok, 1 skipped, 1 conflicts, 1 failed (across 4 repos)" in message
 
 
 @pytest.mark.unit
@@ -942,13 +1052,15 @@ def test_duration_is_logged_per_repo_and_for_the_whole_run(
     first production run" is an unfalsifiable promise, so the numbers are
     asserted to be present and parseable — not merely assumed."""
     idx = _RecordingIndex()
-    engine = _FakeEngine(stamps={"acme/gadgets": ("sha_gadgets", INDEX_SEMANTICS_VERSION)})
+    engine = _FakeEngine(
+        stamps={("acme/gadgets", "main"): ("sha_gadgets", INDEX_SEMANTICS_VERSION)}
+    )
     with caplog.at_level(logging.INFO, logger="indexer.job"):
         code = _run(_config(repos=["acme/widgets", "acme/gadgets"]), idx, engine=engine)
     assert code == 0
 
     indexed = _elapsed(caplog, r"finished acme/widgets in ([0-9.]+)s")
-    skipped = _elapsed(caplog, r"skipped acme/gadgets: .* in ([0-9.]+)s")
+    skipped = _elapsed(caplog, r"skipped acme/gadgets@main: .* in ([0-9.]+)s")
     total = _elapsed(caplog, r"indexing complete: .* in ([0-9.]+)s")
     for elapsed in (indexed, skipped, total):
         assert elapsed >= 0.0
@@ -1008,6 +1120,7 @@ def test_repo_context_is_reset_even_when_the_repo_fails() -> None:
     set() — would be attributed to the PREVIOUS repo.
     """
     from indexer.job import _index_one, _repo_ctx
+    from indexer.resolve import RepoEntry
 
     assert _repo_ctx.get() == "-"
     with (
@@ -1016,12 +1129,13 @@ def test_repo_context_is_reset_even_when_the_repo_fails() -> None:
     ):
         # A malformed entry: normalize_repo raises AFTER the context is set.
         _index_one(
-            "https://evil.com/a/b",
+            RepoEntry(name="https://evil.com/a/b", branch_globs=frozenset()),
             http_client=client,
             engine=_FakeEngine(),
             index_fn=_RecordingIndex(),
             cfg=Settings(semantic_enabled=False),
             embed_fn=None,
+            stamps={},
         )
     assert _repo_ctx.get() == "-"
 
@@ -1215,7 +1329,7 @@ def test_starved_repo_fails_alone_and_downloads_nothing(
     import indexer.job as job
 
     def _guard(path: Any, *, repo: str) -> None:
-        if repo == "acme/gadgets":
+        if repo.startswith("acme/gadgets"):
             raise OSError(f"insufficient local disk for {repo}: lower index_concurrency")
 
     monkeypatch.setattr(job, "assert_disk_headroom", _guard)

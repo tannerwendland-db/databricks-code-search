@@ -87,10 +87,10 @@ def test_rrf_sql_shared_wrapper(backend: str) -> None:
     # cost-based -- it seq-scans and full-sorts even with enable_seqscan=off. This guard is
     # the ONLY thing protecting the BM25 leg: CI's stand-in metric (ts_rank_cd) is never
     # index-ordered, so a regression here is invisible to any EXPLAIN test.
-    assert "ORDER BY embedding <=> (:qvec)::vector LIMIT :topk" in sql
+    assert "ORDER BY c.embedding <=> (:qvec)::vector LIMIT :topk" in sql
     assert ", id LIMIT :topk" not in sql
     # NULL embeddings never earn RRF credit.
-    assert "WHERE embedding IS NOT NULL" in sql
+    assert "AND c.embedding IS NOT NULL" in sql
     # Each leg's candidate cap lives in an INNER subquery whose ORDER BY repeats the metric
     # EXPRESSION (not the alias) -- that is what lets the ANN/BM25 index serve the ordering.
     assert sql.count("LIMIT :topk) s)") == 2
@@ -106,12 +106,15 @@ def test_rrf_sql_shared_wrapper(backend: str) -> None:
     # The query vector is a bound param cast, never interpolated.
     assert "(:qvec)::vector" in sql
     assert ":qtext" in sql
+    # Default (no branch=) scopes each leg to its chunk's own repo's default branch --
+    # byte-identical coalesce to the query compiler's implicit conjunct / 0003 backfill.
+    assert sql.count("coalesce(r.default_branch, 'HEAD') = ANY(f.branches)") == 2
 
 
 @pytest.mark.unit
 def test_rrf_sql_lakebase_leg_uses_bm25_scorer() -> None:
     sql = str(semantic.build_hybrid_rrf_sql("lakebase"))
-    scorer = "ts <@> to_bm25query(to_tsvector('english', :qtext), 'ix_chunks_ts_bm25'::regclass)"
+    scorer = "c.ts <@> to_bm25query(to_tsvector('english', :qtext), 'ix_chunks_ts_bm25'::regclass)"
     # Repeated in the inner SELECT and its ORDER BY so the bm25 index serves the ordering.
     assert sql.count(scorer) == 2
     assert "ts_rank_cd" not in sql
@@ -121,10 +124,55 @@ def test_rrf_sql_lakebase_leg_uses_bm25_scorer() -> None:
 def test_rrf_sql_standin_leg_uses_negated_ts_rank_cd() -> None:
     sql = str(semantic.build_hybrid_rrf_sql("standin"))
     # Negated so ASC-orders-best, keeping the shared wrapper's ORDER BY direction identical.
-    assert sql.count("- ts_rank_cd(ts, plainto_tsquery('english', :qtext))") == 2
+    assert sql.count("- ts_rank_cd(c.ts, plainto_tsquery('english', :qtext))") == 2
     assert "to_bm25query" not in sql
     # The ANN leg is byte-identical to the lakebase backend's (pgvector `<=>` == lakebase_ann).
-    assert sql.count("embedding <=> (:qvec)::vector") == 2
+    assert sql.count("c.embedding <=> (:qvec)::vector") == 2
+
+
+# --------------------------------------------------------- branch-scoped leg (0003, D1)
+
+
+@pytest.mark.unit
+def test_rrf_sql_explicit_branch_uses_gin_served_membership() -> None:
+    sql = str(semantic.build_hybrid_rrf_sql("standin", branch="feature/x"))
+    # Explicit branch: opts into the GIN-served exact-membership predicate on BOTH legs,
+    # and the default coalesce predicate must not also be present.
+    assert sql.count("f.branches @> ARRAY[:branch]") == 2
+    assert "coalesce(r.default_branch" not in sql
+
+
+@pytest.mark.unit
+def test_rrf_sql_branch_predicate_is_where_never_order_by() -> None:
+    # The branch predicate must never leak into either leg's ORDER BY -- that would cost the
+    # ANN/BM25 index a second sort key (see _leg_cte). It belongs only in the inner WHERE.
+    sql = str(semantic.build_hybrid_rrf_sql("standin", branch="feature/x"))
+    for order_by_clause in [
+        "ORDER BY c.embedding <=> (:qvec)::vector LIMIT :topk",
+        "ORDER BY - ts_rank_cd(c.ts, plainto_tsquery('english', :qtext)) LIMIT :topk",
+    ]:
+        assert order_by_clause in sql
+        assert "branches" not in order_by_clause
+
+
+@pytest.mark.unit
+def test_rrf_sql_inner_subquery_is_c_qualified_outer_window_stays_bare() -> None:
+    """Compile-time proof of the qualification-scope contract (0003, D1 -- review-hardened).
+
+    The INNER subquery (which joins chunks/files/repos for branch scoping) must qualify its
+    id/metric columns `c.`; the OUTER row_number() window selects from the derived table `s`
+    (columns `id`/`metric` only) and must stay BARE. Catches both directions: under-qualifying
+    the inner id (ambiguous against files.id/repos.id) and over-qualifying the outer window
+    (`c.id` there is invalid SQL -- "missing FROM-clause entry for table c").
+    """
+    sql = str(semantic.build_hybrid_rrf_sql("standin"))
+    # Inner projection: c.-qualified id and metric, sourced from the 3-way join.
+    assert sql.count("SELECT c.id AS id,") == 2
+    assert "FROM chunks c JOIN files f ON f.id = c.file_id JOIN repos r ON r.id = f.repo_id" in sql
+    # Outer window: bare id/metric over the derived table `s`, never c.id.
+    assert sql.count("SELECT id, row_number() OVER (ORDER BY metric, id) AS rank FROM (") == 2
+    assert "SELECT c.id, row_number()" not in sql
+    assert "ORDER BY c.metric" not in sql
 
 
 @pytest.mark.unit

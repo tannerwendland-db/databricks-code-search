@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 _VERSIONS_DIR = Path(__file__).resolve().parents[2] / "app" / "alembic" / "versions"
-_EXPECTED_REVISIONS = {"0001", "0002"}
+_EXPECTED_REVISIONS = {"0001", "0002", "0003"}
 
 
 @pytest.fixture
@@ -41,6 +41,11 @@ def source(sources: dict[str, str]) -> str:
 @pytest.fixture
 def source_0002(sources: dict[str, str]) -> str:
     return sources["0002"]
+
+
+@pytest.fixture
+def source_0003(sources: dict[str, str]) -> str:
+    return sources["0003"]
 
 
 @pytest.mark.unit
@@ -98,3 +103,45 @@ def test_0002_does_not_import_app_constant(source_0002: str) -> None:
 @pytest.mark.unit
 def test_0002_downgrade_returns_to_0001_shape(source_0002: str) -> None:
     assert 'op.drop_column("repos", "index_semantics_version")' in source_0002
+
+
+@pytest.mark.unit
+def test_0003_revision_identifiers(source_0003: str) -> None:
+    assert 'revision: str = "0003"' in source_0003
+    assert 'down_revision: str | None = "0002"' in source_0003
+
+
+@pytest.mark.unit
+def test_0003_pgcrypto_created_before_digest(source_0003: str) -> None:
+    ext_pos = source_0003.find("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+    digest_pos = source_0003.find("digest(coalesce(content")
+    assert ext_pos != -1, "missing CREATE EXTENSION IF NOT EXISTS pgcrypto"
+    assert digest_pos != -1, "missing digest(coalesce(content...)) backfill"
+    assert ext_pos < digest_pos, "pgcrypto must be created before digest() is used"
+
+
+@pytest.mark.unit
+def test_0003_downgrade_guard_runs_before_any_drop(source_0003: str) -> None:
+    """The multi-branch-data guard must raise before any destructive DDL runs."""
+    downgrade_pos = source_0003.find("def downgrade()")
+    guard_pos = source_0003.find("raise RuntimeError(", downgrade_pos)
+    first_drop_pos = source_0003.find("op.drop_", downgrade_pos)
+    assert downgrade_pos != -1
+    assert guard_pos != -1, "missing the dup-guard raise in downgrade()"
+    assert first_drop_pos != -1, "missing any op.drop_ call in downgrade()"
+    assert guard_pos < first_drop_pos, "the guard must run before any destructive DDL"
+
+
+@pytest.mark.unit
+def test_0003_does_not_import_app_constant(source_0003: str) -> None:
+    """A migration is a historical fact; it must not depend on a mutable app constant."""
+    code_lines = [
+        line
+        for line in source_0003.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    for line in code_lines:
+        if line.startswith(("import ", "from ")):
+            assert not line.startswith(("import app", "from app")), (
+                f"0003 must not import from the app package: {line!r}"
+            )

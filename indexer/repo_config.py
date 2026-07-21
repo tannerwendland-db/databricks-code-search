@@ -90,12 +90,21 @@ class ExcludeRules(BaseModel):
 
 
 class GitHubConnection(BaseModel):
-    """A GitHub selector set. ``orgs``, ``users``, and ``repos`` are unioned."""
+    """A GitHub selector set. ``orgs``, ``users``, and ``repos`` are unioned.
+
+    ``branches`` is a list of glob patterns (Sourcebot ``revisions.branches``
+    style) matched against each resolved repo's branch list, in addition to its
+    default branch (always included regardless of match). **Empty (the default)
+    means default-branch-only** -- the pre-multi-branch behavior every existing
+    config keeps without a change. See ``indexer.branches.resolve_branches`` for
+    the match/dedup/cap semantics.
+    """
 
     type: Literal["github"]
     orgs: list[str] = []
     users: list[str] = []
     repos: list[str] = []
+    branches: list[str] = []
     exclude: ExcludeRules = ExcludeRules()
 
     @model_validator(mode="after")

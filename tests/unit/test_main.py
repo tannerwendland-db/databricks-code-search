@@ -124,6 +124,8 @@ def _grep_result() -> GrepResult:
                 repo_id=7,
                 path="src/handler.go",
                 lang="go",
+                content_sha="deadbeef",
+                branches=("main",),
                 line_matches=(
                     LineMatch(
                         line_number=3,
@@ -161,7 +163,7 @@ def test_search_code_payload_matches_golden_shape(monkeypatch: pytest.MonkeyPatc
             "repo": "acme/widgets",
             "file": "src/handler.go",
             "language": "go",
-            "branches": ["HEAD"],
+            "branches": ["main"],
             "matches": [
                 {
                     "line": 3,
@@ -252,6 +254,8 @@ def test_sym_matches_merge_into_same_file_ordered_by_line(monkeypatch: pytest.Mo
                 repo_id=7,
                 path="src/handler.go",
                 lang="go",
+                content_sha="deadbeef",
+                branches=("main",),
                 name="Handler",
                 kind="function",
                 start_line=2,
@@ -297,6 +301,8 @@ def test_sym_only_query_returns_symbol_file_grep_empty(monkeypatch: pytest.Monke
                 repo_id=7,
                 path="src/handler.go",
                 lang="go",
+                content_sha="deadbeef",
+                branches=("main",),
                 name="Handler",
                 kind="function",
                 start_line=2,
@@ -350,6 +356,8 @@ def test_sym_truncation_sets_row_cap(monkeypatch: pytest.MonkeyPatch) -> None:
                 repo_id=7,
                 path="src/handler.go",
                 lang="go",
+                content_sha="deadbeef",
+                branches=("main",),
                 name="Handler",
                 kind="function",
                 start_line=2,
@@ -382,6 +390,8 @@ def _one_sym() -> SymbolResult:
             repo_id=7,
             path="src/handler.go",
             lang="go",
+            content_sha="deadbeef",
+            branches=("main",),
             name="Handler",
             kind="function",
             start_line=2,
@@ -515,15 +525,24 @@ def test_envelope_keys_are_pinned_shape_plus_exactly_two(monkeypatch: pytest.Mon
 
 @pytest.mark.unit
 def test_list_repos_payload_shape_and_iso8601() -> None:
+    # One row per (repo, repo_branches row); a repo with no repo_branches rows at all comes
+    # back as a single row with branch=None (LEFT JOIN), same as an empty-schema repo pre-0003.
     rows = [
         _Row(
+            id=1,
             name="acme/widgets",
             default_branch="main",
-            last_indexed_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
+            branch="main",
             last_indexed_commit="abc123",
+            last_indexed_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
         ),
         _Row(
-            name="beta/tools", default_branch=None, last_indexed_at=None, last_indexed_commit=None
+            id=2,
+            name="beta/tools",
+            default_branch=None,
+            branch=None,
+            last_indexed_commit=None,
+            last_indexed_at=None,
         ),
     ]
     engine = _FakeEngine([_FakeResult(rows)])
@@ -536,10 +555,53 @@ def test_list_repos_payload_shape_and_iso8601() -> None:
         "index_time": "2026-07-18T00:00:00+00:00",
         "default_branch": "main",
         "last_indexed_commit": "abc123",
+        "branch_details": [
+            {
+                "branch": "main",
+                "last_indexed_commit": "abc123",
+                "index_time": "2026-07-18T00:00:00+00:00",
+            }
+        ],
     }
-    # Null branch -> ["HEAD"]; null index time -> null.
+    # No repo_branches rows -> ["HEAD"]; null index time.
     assert payload["repos"][1]["branches"] == ["HEAD"]
     assert payload["repos"][1]["index_time"] is None
+    assert payload["repos"][1]["branch_details"] == []
+
+
+@pytest.mark.unit
+def test_list_repos_payload_multi_branch_real_array() -> None:
+    # A repo indexed on two branches: `branches` carries BOTH real names (not a guess from
+    # the single default_branch stamp), and each gets its own branch_details entry.
+    rows = [
+        _Row(
+            id=1,
+            name="acme/widgets",
+            default_branch="main",
+            branch="feature/x",
+            last_indexed_commit="feat123",
+            last_indexed_at=datetime(2026, 7, 19, tzinfo=timezone.utc),
+        ),
+        _Row(
+            id=1,
+            name="acme/widgets",
+            default_branch="main",
+            branch="main",
+            last_indexed_commit="abc123",
+            last_indexed_at=datetime(2026, 7, 18, tzinfo=timezone.utc),
+        ),
+    ]
+    engine = _FakeEngine([_FakeResult(rows)])
+
+    payload = main._list_repos_payload(engine, _cfg())
+    (repo,) = payload["repos"]
+    assert set(repo["branches"]) == {"feature/x", "main"}
+    # Top-level index_time/last_indexed_commit mirror the DEFAULT branch's row, not whichever
+    # sorted first.
+    assert repo["default_branch"] == "main"
+    assert repo["last_indexed_commit"] == "abc123"
+    assert repo["index_time"] == "2026-07-18T00:00:00+00:00"
+    assert len(repo["branch_details"]) == 2
 
 
 @pytest.mark.unit
@@ -554,12 +616,41 @@ def test_list_repos_sets_transaction_local_timeout() -> None:
 
 @pytest.mark.unit
 def test_get_file_hit_shape() -> None:
-    engine = _FakeEngine([_FakeResult(["package main\n..."])])
+    # branch=None: two queries -- the coalesced default_branch lookup, then the content
+    # lookup -- both fed from the fake connection's canned result queue in call order.
+    engine = _FakeEngine([_FakeResult(["main"]), _FakeResult(["package main\n..."])])
     payload = main._get_file_payload(engine, _cfg(), "acme/widgets", "src/handler.go")
     assert payload == {
         "repo": "acme/widgets",
         "path": "src/handler.go",
-        "branch": "HEAD",
+        "branch": "main",
+        "content": "package main\n...",
+        "found": True,
+    }
+
+
+@pytest.mark.unit
+def test_get_file_hit_shape_null_default_branch() -> None:
+    # A repo with a NULL default_branch: the SQL-side coalesce(...,'HEAD') already resolves
+    # to 'HEAD' server-side, so the fake first result mirrors that (byte-identical resolution
+    # to the compiler/migration/semantic sites).
+    engine = _FakeEngine([_FakeResult(["HEAD"]), _FakeResult(["content"])])
+    payload = main._get_file_payload(engine, _cfg(), "beta/tools", "main.py")
+    assert payload["branch"] == "HEAD"
+    assert payload["found"] is True
+
+
+@pytest.mark.unit
+def test_get_file_hit_shape_explicit_branch() -> None:
+    # An explicit branch skips the default_branch lookup entirely -- one query, one result.
+    engine = _FakeEngine([_FakeResult(["package main\n..."])])
+    payload = main._get_file_payload(
+        engine, _cfg(), "acme/widgets", "src/handler.go", branch="feature/x"
+    )
+    assert payload == {
+        "repo": "acme/widgets",
+        "path": "src/handler.go",
+        "branch": "feature/x",
         "content": "package main\n...",
         "found": True,
     }
@@ -567,15 +658,33 @@ def test_get_file_hit_shape() -> None:
 
 @pytest.mark.unit
 def test_get_file_miss_shape() -> None:
-    engine = _FakeEngine([_FakeResult([])])  # scalar_one_or_none -> None
+    # Repo exists (default_branch lookup hits "main") but the path does not.
+    engine = _FakeEngine([_FakeResult(["main"]), _FakeResult([])])  # 2nd scalar_one_or_none -> None
     payload = main._get_file_payload(engine, _cfg(), "acme/widgets", "nope.go")
     assert payload == {
         "repo": "acme/widgets",
         "path": "nope.go",
-        "branch": "HEAD",
+        "branch": "main",
         "content": None,
         "found": False,
     }
+
+
+@pytest.mark.unit
+def test_get_file_miss_shape_unknown_repo() -> None:
+    # Repo does not exist at all: the default_branch lookup itself misses -> falls back "HEAD".
+    engine = _FakeEngine([_FakeResult([]), _FakeResult([])])
+    payload = main._get_file_payload(engine, _cfg(), "nope/repo", "nope.go")
+    assert payload["branch"] == "HEAD"
+    assert payload["found"] is False
+
+
+@pytest.mark.unit
+def test_get_file_miss_shape_explicit_branch_echoes_requested_branch() -> None:
+    engine = _FakeEngine([_FakeResult([])])
+    payload = main._get_file_payload(engine, _cfg(), "acme/widgets", "nope.go", branch="feature/x")
+    assert payload["branch"] == "feature/x"
+    assert payload["found"] is False
 
 
 # ------------------------------------------------------------------------------- clamp
@@ -588,6 +697,172 @@ def test_get_file_miss_shape() -> None:
 )
 def test_clamp_limit(limit: int, expected: int) -> None:
     assert main._clamp_limit(limit, _cfg()) == expected
+
+
+# --------------------------------------------------------- branch param / query atom wiring
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "query,branch,expected",
+    [
+        ("foo", "main", 'foo branch:"main"'),
+        ("", "main", 'branch:"main"'),  # empty base query: no dangling leading space
+        ("foo", "feature/x", 'foo branch:"feature/x"'),  # "/" needs no escaping
+        ("foo", 'weird"branch', 'foo branch:"weird\\"branch"'),  # embedded quote is escaped
+    ],
+)
+def test_append_branch_atom(query: str, branch: str, expected: str) -> None:
+    assert main._append_branch_atom(query, branch) == expected
+
+
+class _FakeLifespanContext:
+    def __init__(self, engine: Any, cfg: Settings) -> None:
+        self.request_context = _Row(lifespan_context={"engine": engine, "config": cfg})
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_search_code_tool_appends_branch_atom_to_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_payload(engine: Any, cfg: Settings, query: str, limit: int) -> dict[str, Any]:
+        captured["query"] = query
+        return {"query": query}
+
+    monkeypatch.setattr(main, "_search_code_payload", _fake_payload)
+    ctx = _FakeLifespanContext(_FakeEngine([]), _cfg())
+
+    await main.search_code("foo", ctx, branch="release/1.0")  # type: ignore[arg-type]
+
+    assert captured["query"] == 'foo branch:"release/1.0"'
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_search_code_tool_leaves_query_untouched_without_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_payload(engine: Any, cfg: Settings, query: str, limit: int) -> dict[str, Any]:
+        captured["query"] = query
+        return {"query": query}
+
+    monkeypatch.setattr(main, "_search_code_payload", _fake_payload)
+    ctx = _FakeLifespanContext(_FakeEngine([]), _cfg())
+
+    await main.search_code("foo", ctx)  # type: ignore[arg-type]
+
+    assert captured["query"] == "foo"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_semantic_search_tool_threads_branch_to_payload_not_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_payload(
+        engine: Any, cfg: Settings, query: str, limit: int, branch: str | None = None
+    ) -> dict[str, Any]:
+        captured["query"] = query
+        captured["branch"] = branch
+        return {"query": query}
+
+    monkeypatch.setattr(main, "_semantic_search_payload", _fake_payload)
+    ctx = _FakeLifespanContext(_FakeEngine([]), _cfg())
+
+    await main.semantic_search("auth flow", ctx, branch="release/1.0")  # type: ignore[arg-type]
+
+    # The query string is untouched -- branch goes straight to the SQL predicate.
+    assert captured["query"] == "auth flow"
+    assert captured["branch"] == "release/1.0"
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_get_file_tool_threads_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_payload(
+        engine: Any, cfg: Settings, repo: str, path: str, branch: str | None = None
+    ) -> dict[str, Any]:
+        captured["branch"] = branch
+        return {"found": False}
+
+    monkeypatch.setattr(main, "_get_file_payload", _fake_payload)
+    ctx = _FakeLifespanContext(_FakeEngine([]), _cfg())
+
+    await main.get_file("acme/widgets", "src/handler.go", ctx, branch="feature/x")  # type: ignore[arg-type]
+
+    assert captured["branch"] == "feature/x"
+
+
+# ------------------------------------------------- search_code: divergent content_sha merge
+
+
+@pytest.mark.unit
+def test_search_code_splits_divergent_content_versions_of_one_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Two branches of the SAME path with DIFFERENT content (different content_sha): the
+    # (repo_id, path, content_sha) merge key must keep them as two distinct file entries,
+    # each labeled with its own real branches array -- not collapsed into one.
+    result = GrepResult(
+        files=(
+            FileMatches(
+                repo_id=7,
+                path="src/handler.go",
+                lang="go",
+                content_sha="sha-main",
+                branches=("main",),
+                line_matches=(LineMatch(1, "foo", ((0, 3),)),),
+            ),
+            FileMatches(
+                repo_id=7,
+                path="src/handler.go",
+                lang="go",
+                content_sha="sha-feature",
+                branches=("feature/x",),
+                line_matches=(LineMatch(1, "foo bar", ((0, 3),)),),
+            ),
+        ),
+        truncated=False,
+        truncation_reason=None,
+        regex_incompatible=False,
+        no_content_atom=False,
+        zero_width_only_atoms=False,
+    )
+    monkeypatch.setattr(main, "grep_search", lambda *a, **k: result)
+    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _no_sym())
+    engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
+
+    payload = main._search_code_payload(engine, _cfg(), "foo", 50)
+
+    assert payload["file_count"] == 2
+    expected = [
+        {
+            "repo": "acme/widgets",
+            "file": "src/handler.go",
+            "language": "go",
+            "branches": ["main"],
+            "matches": [{"line": 1, "text": "foo", "byte_ranges": [[0, 3]]}],
+        },
+        {
+            "repo": "acme/widgets",
+            "file": "src/handler.go",
+            "language": "go",
+            "branches": ["feature/x"],
+            "matches": [{"line": 1, "text": "foo bar", "byte_ranges": [[0, 3]]}],
+        },
+    ]
+    assert sorted(payload["files"], key=lambda f: f["branches"]) == sorted(
+        expected, key=lambda f: f["branches"]
+    )
 
 
 # ------------------------------------------------------------- observability choke-point

@@ -25,6 +25,7 @@ from app.db.client import create_db_engine
 from app.db.models import Base, File, Repo
 from app.search.errors import QueryTooBroadError
 from app.search.grep import GrepResult, grep_search
+from indexer.hashing import content_sha
 
 SCHEMA_PREFIX = "test_grep"
 
@@ -39,8 +40,10 @@ def _unique(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def _insert_repo(conn: Connection, name: str) -> int:
-    return conn.execute(insert(Repo).values(name=name).returning(Repo.id)).scalar_one()
+def _insert_repo(conn: Connection, name: str, *, default_branch: str | None = "main") -> int:
+    return conn.execute(
+        insert(Repo).values(name=name, default_branch=default_branch).returning(Repo.id)
+    ).scalar_one()
 
 
 def _insert_file(
@@ -50,10 +53,20 @@ def _insert_file(
     *,
     lang: str | None,
     content: str | None,
+    branches: list[str] | None = None,
 ) -> int:
+    # branches defaults to ["main"], matching _insert_repo's default_branch="main" -- every
+    # existing (pre-0003) test keeps seeing its files via the implicit default-branch conjunct.
     return conn.execute(
         insert(File)
-        .values(repo_id=repo_id, path=path, lang=lang, content=content)
+        .values(
+            repo_id=repo_id,
+            path=path,
+            lang=lang,
+            content=content,
+            content_sha=content_sha(content),
+            branches=branches if branches is not None else ["main"],
+        )
         .returning(File.id)
     ).scalar_one()
 
@@ -360,3 +373,61 @@ def test_or_true_negative_does_not_set_either_flag(seeded: Seeded) -> None:
     assert result.files == ()
     assert result.no_content_atom is False
     assert result.zero_width_only_atoms is False
+
+
+# ------------------------------------------------------------------- 11. branch scoping (0003)
+
+
+@pytest.mark.integration
+def test_grep_default_query_excludes_feature_only_content(seeded: Seeded) -> None:
+    # A path with two content versions: "main" (default, matched by default query) and
+    # "feature" (only reachable via branch:). No branch: atom -> implicit default conjunct.
+    _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="quux on main",
+        branches=["main"],
+    )
+    _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="quux on feature",
+        branches=["feature"],
+    )
+    seeded.conn.commit()
+
+    default_result = grep_search(seeded.conn, "quux")
+    assert _paths(default_result) == ["src/multi.go"]
+    (multi,) = [f for f in default_result.files if f.path == "src/multi.go"]
+    assert multi.branches == ("main",)
+
+
+@pytest.mark.integration
+def test_grep_branch_filter_returns_only_named_branch_content(seeded: Seeded) -> None:
+    _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="quux on main",
+        branches=["main"],
+    )
+    _insert_file(
+        seeded.conn,
+        seeded.acme_id,
+        "src/multi.go",
+        lang="go",
+        content="quux on feature",
+        branches=["feature"],
+    )
+    seeded.conn.commit()
+
+    result = grep_search(seeded.conn, "branch:feature quux")
+    (multi,) = [f for f in result.files if f.path == "src/multi.go"]
+    assert multi.branches == ("feature",)
+    (line,) = multi.line_matches
+    assert "feature" in line.line_text

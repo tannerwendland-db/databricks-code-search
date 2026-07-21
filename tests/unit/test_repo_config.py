@@ -146,6 +146,23 @@ def test_connection_with_no_selectors_rejected() -> None:
 
 
 @pytest.mark.unit
+def test_branches_defaults_to_empty() -> None:
+    """Empty (the default) means default-branch-only -- old configs are unaffected."""
+    cfg = parse_config(_MINIMAL, source="cfg")
+    assert cfg.connections[0].branches == []
+
+
+@pytest.mark.unit
+def test_branches_accepts_glob_patterns() -> None:
+    raw = (
+        b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"
+        b"    branches: ['release/*', 'staging']\n"
+    )
+    cfg = parse_config(raw, source="cfg")
+    assert cfg.connections[0].branches == ["release/*", "staging"]
+
+
+@pytest.mark.unit
 def test_exclude_defaults() -> None:
     """AC 6."""
     cfg = parse_config(_MINIMAL, source="cfg")

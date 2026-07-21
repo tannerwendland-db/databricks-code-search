@@ -31,8 +31,8 @@ def test_collect_single_sym_atom() -> None:
 
 @pytest.mark.unit
 def test_collect_ignores_non_sym_leaves() -> None:
-    # Substring, regex, repo/path/lang filters all contribute no symbol patterns.
-    assert _patterns("repo:acme lang:go /Foo.*/ file:x bar") == []
+    # Substring, regex, repo/path/lang/branch filters all contribute no symbol patterns.
+    assert _patterns("repo:acme lang:go /Foo.*/ file:x branch:main bar") == []
 
 
 @pytest.mark.unit
@@ -65,6 +65,8 @@ def test_projection_selects_symbol_and_file_columns() -> None:
     assert "files.repo_id" in sql
     assert "files.path" in sql
     assert "files.lang" in sql
+    assert "files.content_sha" in sql
+    assert "files.branches" in sql
     assert "symbols.name" in sql
     assert "symbols.kind" in sql
     assert "symbols.start_line" in sql
@@ -105,6 +107,7 @@ def test_projection_orders_deterministically_with_id_tiebreak() -> None:
     # symbols has no natural uniqueness, so the id tiebreak makes the LIMIT page stable.
     assert "files.repo_id" in order
     assert "files.path" in order
+    assert "files.content_sha" in order
     assert "symbols.start_line" in order
     assert "symbols.name" in order
     assert "symbols.id" in order

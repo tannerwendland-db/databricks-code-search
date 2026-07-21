@@ -12,11 +12,15 @@ caller of the MCP endpoint is allowed to read.
 
 <img src="docs/diagrams/architecture.png" alt="GitHub to indexing job to Lakebase Postgres to MCP server to MCP client" width="450">
 
-The job resolves each repo's default-branch HEAD to an immutable SHA, downloads the
-tarball for that SHA (no git binary — the job runs on serverless), parses every source
-file, extracts symbols with tree-sitter, and writes files and symbols in a single
-transaction stamped with that SHA. Files carrying an older commit are then swept, so a
-failed run rolls back whole rather than leaving the corpus half-updated.
+The job resolves each repo's default branch (plus any extra branches `config.yaml`
+declares, see [Configuring what gets indexed](#configuring-what-gets-indexed)) to an
+immutable SHA per branch, downloads the tarball for that SHA (no git binary — the job runs
+on serverless), parses every source file, extracts symbols with tree-sitter, and writes
+files and symbols in a single transaction per `(repo, branch)`, stamped with that SHA.
+Content shared byte-for-byte across branches dedupes into one row carrying every branch
+that resolves to it; a branch's stale membership is then swept from rows it no longer
+resolves to, so a failed run rolls back whole rather than leaving the corpus
+half-updated.
 
 The server holds one process-scoped SQLAlchemy engine over a 5-connection pool, minting a
 fresh Lakebase OAuth token on each physical connection. Query work runs off the event loop
@@ -24,7 +28,7 @@ under a 5-token limiter sized to the pool.
 
 ## Query language
 
-`search_code` takes a zoekt-style query. Five fields are supported:
+`search_code` takes a zoekt-style query. Six fields are supported:
 
 | Field | Meaning | Example |
 |---|---|---|
@@ -32,14 +36,30 @@ under a 5-token limiter sized to the pool.
 | `file:` | file path | `file:src/` |
 | `lang:` | language, lowercased; unknown values match nothing | `lang:go` |
 | `sym:` | symbol name (correlated `EXISTS` over `symbols`) | `sym:Handler` |
+| `branch:` | exact branch-membership match (GIN-served `@>`, not a glob/regex) | `branch:main` |
 | `case:` | `yes` or `no`; query-global, last one wins | `case:yes Foo` |
 
 Values may be bare (`repo:acme`), quoted (`repo:"my repo"`), or regex
 (`file:/foo\/bar/`). `repo:`, `file:`, and `sym:` values are treated as regex patterns and
-are never escaped.
+are never escaped. `branch:` is the one exception — its value is matched **exactly**
+against a file's real branch membership, never as a regex or glob, and diverges from
+`repo:`'s `~*` semantics on purpose (see
+[`docs/runbooks/multi-branch.md`](docs/runbooks/multi-branch.md#4-branch-query-semantics--exact-not-a-glob)).
 
 Content terms are substrings (`foo`, or `"a b"` to keep spaces) or regexes (`/Foo.*Bar/`).
 Matching is **case-insensitive by default** — there is no smart-case inference like zoekt's.
+
+### Branch scoping
+
+Without `branch:` (or the `branch` tool parameter below), results are scoped to **each
+repo's default branch only** — a file present on a non-default branch never surfaces
+unless a query explicitly asks for it. `branch:<name>` (or `branch=<name>` on
+`search_code`/`semantic_search`/`get_file`) restricts to files whose indexed branches
+include `<name>`, exactly. Which non-default branches are indexed at all is a
+`config.yaml`-time decision (`branches:` globs, capped at 20 per repo) — see
+[Configuring what gets indexed](#configuring-what-gets-indexed) and
+[`docs/runbooks/multi-branch.md`](docs/runbooks/multi-branch.md) for the indexer/deploy
+side of multi-branch support.
 
 Whitespace means AND, `OR` (any case) means OR, and AND binds tighter:
 
@@ -55,8 +75,8 @@ dangerous case:
 - **Negation.** `-foo` parses as a literal substring, with no error. If negation ships
   later, queries written today will silently flip meaning.
 - **`AND` as a keyword.** `a and b` silently searches for the literal word `and`.
-- **`content:` and `branch:`**, and the single-letter aliases `r` `f` `l` `b` `c` `s` —
-  reserved, and raise a parse error.
+- **`content:`**, and the single-letter aliases `r` `f` `l` `b` `c` `s` — reserved, and
+  raise a parse error. (`branch:` is no longer reserved — see the field table above.)
 - **Dangling `OR`** (`a OR`, `OR a`) and **empty groups** (`()`) raise.
 
 ### Regex is not RE2
@@ -87,13 +107,23 @@ stall the server. `statement_timeout` bounds the database, not the rescan.
 
 | Tool | Parameters | Returns |
 |---|---|---|
-| `search_code` | `query`, `limit=200` | file-grouped line matches with byte ranges |
-| `semantic_search` | `query`, `limit=50` | ranked chunks with `rrf_score` |
-| `list_repos` | — | indexed repos with last-indexed metadata |
-| `get_file` | `repo`, `path` | full file content, or `found: false` |
+| `search_code` | `query`, `limit=200`, `branch=None` | file-grouped line matches with byte ranges |
+| `semantic_search` | `query`, `limit=50`, `branch=None` | ranked chunks with `rrf_score` |
+| `list_repos` | — | indexed repos with per-branch last-indexed metadata |
+| `get_file` | `repo`, `path`, `branch=None` | full file content, or `found: false` |
 
 Every tool returns a JSON string. `limit` is clamped server-side: a non-positive value
 falls back to 200, and anything above 1000 is capped there.
+
+`branch` behaves differently per tool because `search_code` takes zoekt grammar and
+`semantic_search` takes natural language: on `search_code` it is sugar for appending
+`branch:"<value>"` to the query string (quoted, so `/`, `.`, and spaces need no escaping
+of their own); on `semantic_search` it threads straight to the SQL predicate, never into
+the free-text query. Omitted on either, results scope to each repo's default branch. On
+`get_file`, `branch` disambiguates when a path has more than one indexed content version
+(divergent branches) and the response's `branch` field reports which one was resolved —
+never the literal string `"HEAD"` unless that is genuinely the resolved branch (e.g. a
+repo with no `default_branch` recorded).
 
 Recoverable conditions come back as payload fields —
 `query_parse_error`, `query_too_broad`, `truncated`, `regex_incompatible` — rather than
@@ -210,6 +240,8 @@ connections:
       - acme
     repos:
       - otherorg/specific-repo
+    branches:
+      - "release/*"
     exclude:
       forks: true
       archived: true
@@ -221,6 +253,18 @@ connections:
 `users`, `orgs`, and `repos` are **unioned**, then deduplicated by canonical `org/repo`.
 `users` and `orgs` are expanded through the GitHub API at runtime; `repos` entries are
 taken verbatim with no enumeration call.
+
+### `branches:` — indexing more than the default branch
+
+`branches` is a list of glob patterns (`fnmatchcase`, exact-name match — not a regex)
+matched against each repo's branch list, **in addition to** its default branch, which is
+always indexed regardless of match. Empty (the default, and every config that predates
+this feature) means default-branch-only, with no behavior change and no extra GitHub API
+call. Resolved branches are capped at 20 per repo, truncated default-first-then-alphabetical
+with a loud warning if a glob matches more. See
+[`docs/runbooks/multi-branch.md`](docs/runbooks/multi-branch.md) for the cap/truncation
+details, the deploy-grant coupling this feature introduces, and how `branch:`-scoped
+queries reach this indexed set at query time.
 
 ### `exclude` rules
 
@@ -408,6 +452,9 @@ Run the server locally with `make run` (binds `DATABRICKS_APP_PORT`, else 8000).
 
 ## Reference
 
+- [`docs/runbooks/multi-branch.md`](docs/runbooks/multi-branch.md) — configuring and
+  deploying multi-branch indexing (`branches:` globs, the 20-branch cap, `branch:`
+  query semantics, the grant-coupling this migration introduces)
 - [`docs/runbooks/semantic-enablement.md`](docs/runbooks/semantic-enablement.md) — turning
   on semantic search
 - [`docs/runbooks/ci-lakebase.md`](docs/runbooks/ci-lakebase.md) — running CI against a

@@ -2,8 +2,8 @@
 
 These are hermetic: local (PGHOST) mode must build an engine without instantiating
 the Databricks SDK, and the models must expose exactly the durable-core
-schema (repos / files / symbols) with the expected FKs, unique constraint, and
-pg_trgm GIN indexes.
+schema (repos / files / symbols / repo_branches) with the expected FKs, unique
+constraints, and GIN indexes.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def test_create_engine_local_mode_never_touches_sdk(
 
 @pytest.mark.unit
 def test_metadata_has_exactly_durable_core_tables() -> None:
-    assert set(Base.metadata.tables) == {"repos", "files", "symbols"}
+    assert set(Base.metadata.tables) == {"repos", "files", "symbols", "repo_branches"}
 
 
 @pytest.mark.unit
@@ -77,12 +77,40 @@ def test_files_foreign_key_to_repos() -> None:
 
 
 @pytest.mark.unit
-def test_files_unique_repo_id_path() -> None:
+def test_files_unique_repo_path_content_sha() -> None:
+    """Post-0003 the dedup key is (repo_id, path, content_sha), not (repo_id, path)."""
     files = Base.metadata.tables["files"]
     unique_cols = [
         {c.name for c in c.columns} for c in files.constraints if isinstance(c, UniqueConstraint)
     ]
-    assert {"repo_id", "path"} in unique_cols
+    assert {"repo_id", "path", "content_sha"} in unique_cols
+
+
+@pytest.mark.unit
+def test_files_branches_gin_index_declared() -> None:
+    files = Base.metadata.tables["files"]
+    idx = next(i for i in files.indexes if i.name == "ix_files_branches_gin")
+    assert idx.dialect_options["postgresql"]["using"] == "gin"
+    assert {c.name for c in idx.columns} == {"branches"}
+
+
+@pytest.mark.unit
+def test_repo_branches_unique_repo_id_branch() -> None:
+    repo_branches = Base.metadata.tables["repo_branches"]
+    unique_cols = [
+        {c.name for c in c.columns}
+        for c in repo_branches.constraints
+        if isinstance(c, UniqueConstraint)
+    ]
+    assert {"repo_id", "branch"} in unique_cols
+
+
+@pytest.mark.unit
+def test_repo_branches_foreign_key_to_repos() -> None:
+    repo_branches = Base.metadata.tables["repo_branches"]
+    fk = next(iter(repo_branches.c.repo_id.foreign_keys))
+    assert fk.column.table.name == "repos"
+    assert fk.ondelete == "CASCADE"
 
 
 @pytest.mark.unit
