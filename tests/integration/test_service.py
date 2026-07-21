@@ -26,6 +26,7 @@ from app import service
 from app.config import Settings
 from app.db.client import create_db_engine
 from app.db.models import Base, File, Repo, Symbol
+from indexer.hashing import content_sha
 
 SCHEMA_PREFIX = "test_service"
 
@@ -86,13 +87,16 @@ def seeded() -> Iterator[Seeded]:
             insert(Repo).values(name="beta/tools").returning(Repo.id)
         ).scalar_one()
 
+        handler_content = "package main\nfunc Handler() {}\n// foo lives here\n"
         handler_id = admin_conn.execute(
             insert(File)
             .values(
                 repo_id=acme_id,
                 path="src/00_handler.go",
                 lang="go",
-                content="package main\nfunc Handler() {}\n// foo lives here\n",
+                content=handler_content,
+                content_sha=content_sha(handler_content),
+                branches=["HEAD"],
             )
             .returning(File.id)
         ).scalar_one()
@@ -102,14 +106,26 @@ def seeded() -> Iterator[Seeded]:
             )
         )
         for path in ["src/a.go", "src/b.go", "src/c.go"]:
+            content = f"// foo in {path}\n"
             admin_conn.execute(
                 insert(File).values(
-                    repo_id=acme_id, path=path, lang="go", content=f"// foo in {path}\n"
+                    repo_id=acme_id,
+                    path=path,
+                    lang="go",
+                    content=content,
+                    content_sha=content_sha(content),
+                    branches=["HEAD"],
                 )
             )
+        note_content = "# foo note\n"
         admin_conn.execute(
             insert(File).values(
-                repo_id=beta_id, path="pkg/note.py", lang="python", content="# foo note\n"
+                repo_id=beta_id,
+                path="pkg/note.py",
+                lang="python",
+                content=note_content,
+                content_sha=content_sha(note_content),
+                branches=["HEAD"],
             )
         )
         admin_conn.commit()
@@ -268,13 +284,16 @@ def test_sym_only_query_with_candidates_over_row_limit_still_returns_single_page
     # against 3 Thing-symbol files reproduces the row-capped candidate scan.
     with seeded.engine.connect() as conn:
         for i in range(3):
+            thing_content = "package main\n"
             file_id = conn.execute(
                 insert(File)
                 .values(
                     repo_id=seeded.acme_id,
                     path=f"src/thing{i}.go",
                     lang="go",
-                    content="package main\n",
+                    content=thing_content,
+                    content_sha=content_sha(thing_content),
+                    branches=["HEAD"],
                 )
                 .returning(File.id)
             ).scalar_one()

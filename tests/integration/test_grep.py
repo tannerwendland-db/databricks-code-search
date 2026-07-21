@@ -431,6 +431,8 @@ def test_grep_branch_filter_returns_only_named_branch_content(seeded: Seeded) ->
     assert multi.branches == ("feature",)
     (line,) = multi.line_matches
     assert "feature" in line.line_text
+
+
 # ------------------------------------------------------------- 11. keyset cursor pagination
 #
 # The `foo` query over the `seeded` corpus, ordered by (repo_id, path), is deterministically
@@ -465,7 +467,8 @@ def test_pagination_row_cap_page_sets_truncated_false_with_resumable_cursor(seed
     # Row-cap fill in pagination mode: NOT an error banner -- there is a next page.
     assert page1.truncated is False
     assert page1.truncation_reason is None
-    assert page1.next_cursor == FileCursor(seeded.acme_id, "src/util.go")
+    util_sha = content_sha("// 你好 foo trailing multibyte line\nno match on this line\n")
+    assert page1.next_cursor == FileCursor(seeded.acme_id, "src/util.go", util_sha)
 
 
 @pytest.mark.integration
@@ -528,7 +531,7 @@ def test_pagination_byte_cap_trips_mid_page_cursor_resumes_after_last_consumed()
         assert _paths(result) == ["a.txt"]
         assert result.truncated is True
         assert result.truncation_reason == "byte_cap"
-        assert result.next_cursor == FileCursor(repo_id, "a.txt")
+        assert result.next_cursor == FileCursor(repo_id, "a.txt", content_sha(small_content))
     finally:
         conn.rollback()
         conn.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))

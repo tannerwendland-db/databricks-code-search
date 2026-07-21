@@ -110,6 +110,8 @@ def _one_sym(*, line: int = 2) -> SymbolResult:
                 repo_id=7,
                 path="src/handler.go",
                 lang="go",
+                content_sha="deadbeef",
+                branches=("main",),
                 name="Handler",
                 kind="function",
                 start_line=line,
@@ -126,7 +128,7 @@ def _one_sym(*, line: int = 2) -> SymbolResult:
 
 @pytest.mark.unit
 def test_cursor_round_trips() -> None:
-    original = FileCursor(repo_id=42, path="src/handler.go")
+    original = FileCursor(repo_id=42, path="src/handler.go", content_sha="deadbeef")
     encoded = service.encode_cursor(original)
     assert isinstance(encoded, str)
     assert service.decode_cursor(encoded) == original
@@ -136,7 +138,7 @@ def test_cursor_round_trips() -> None:
 def test_cursor_is_opaque_base64url_no_padding() -> None:
     # No raw '=' padding chars and no '+'/'/' (base64url, not base64) leaking into the wire
     # value -- it must survive being embedded in a URL query string unescaped.
-    encoded = service.encode_cursor(FileCursor(repo_id=1, path="a/b.py"))
+    encoded = service.encode_cursor(FileCursor(repo_id=1, path="a/b.py", content_sha="deadbeef"))
     assert "=" not in encoded
     assert "+" not in encoded
     assert "/" not in encoded
@@ -169,7 +171,7 @@ def test_decode_cursor_rejects_wrong_version() -> None:
 
 @pytest.mark.unit
 def test_decode_cursor_rejects_tampered_bytes() -> None:
-    encoded = service.encode_cursor(FileCursor(repo_id=1, path="a.py"))
+    encoded = service.encode_cursor(FileCursor(repo_id=1, path="a.py", content_sha="deadbeef"))
     tampered = encoded[:-1] + ("A" if encoded[-1] != "A" else "B")
     with pytest.raises(service.CursorError):
         service.decode_cursor(tampered)
@@ -212,7 +214,7 @@ def test_page_one_cursor_none_includes_next_cursor_key(monkeypatch: pytest.Monke
 
 @pytest.mark.unit
 def test_pagination_mode_encodes_grep_next_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
-    file_cursor = FileCursor(repo_id=7, path="src/handler.go")
+    file_cursor = FileCursor(repo_id=7, path="src/handler.go", content_sha="deadbeef")
     monkeypatch.setattr(
         service, "grep_search", lambda *a, **k: _grep(truncated=False, next_cursor=file_cursor)
     )
@@ -268,6 +270,8 @@ def test_continuation_page_skips_symbol_leg(monkeypatch: pytest.MonkeyPatch) -> 
                     repo_id=7,
                     path="src/handler.go",
                     lang="go",
+                    content_sha="deadbeef",
+                    branches=("main",),
                     line_matches=(
                         LineMatch(line_number=3, line_text="foo", byte_ranges=((0, 3),)),
                     ),
@@ -278,7 +282,9 @@ def test_continuation_page_skips_symbol_leg(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(service, "symbol_search", _spy_symbol_search)
     engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
 
-    cursor = service.encode_cursor(FileCursor(repo_id=7, path="src/handler.go"))
+    cursor = service.encode_cursor(
+        FileCursor(repo_id=7, path="src/handler.go", content_sha="deadbeef")
+    )
     payload = service.search_code_payload(engine, _cfg(), "sym:Handler foo", 50, cursor=cursor)
     assert payload["file_count"] == 1
     # No symbol entry folded in on this page.
@@ -299,7 +305,9 @@ def test_continuation_page_suppresses_no_content_atom_for_sym_only_query(
         service, "symbol_search", lambda *a, **k: pytest.fail("must not run on continuation page")
     )
 
-    cursor = service.encode_cursor(FileCursor(repo_id=7, path="src/handler.go"))
+    cursor = service.encode_cursor(
+        FileCursor(repo_id=7, path="src/handler.go", content_sha="deadbeef")
+    )
     payload = service.search_code_payload(_FakeEngine([]), _cfg(), "sym:Handler", 50, cursor=cursor)
     assert payload["no_content_atom"] is False
 
@@ -315,7 +323,9 @@ def test_continuation_page_without_sym_atom_reports_no_content_atom(
         service, "symbol_search", lambda *a, **k: pytest.fail("must not run on continuation page")
     )
 
-    cursor = service.encode_cursor(FileCursor(repo_id=7, path="docs/readme.md"))
+    cursor = service.encode_cursor(
+        FileCursor(repo_id=7, path="docs/readme.md", content_sha="deadbeef")
+    )
     payload = service.search_code_payload(_FakeEngine([]), _cfg(), "file:.md", 50, cursor=cursor)
     assert payload["no_content_atom"] is True
 

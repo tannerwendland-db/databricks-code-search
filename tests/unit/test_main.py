@@ -838,9 +838,12 @@ def test_search_code_splits_divergent_content_versions_of_one_path(
         regex_incompatible=False,
         no_content_atom=False,
         zero_width_only_atoms=False,
+        next_cursor=None,
     )
-    monkeypatch.setattr(main, "grep_search", lambda *a, **k: result)
-    monkeypatch.setattr(main, "symbol_search", lambda *a, **k: _no_sym())
+    # The payload builder lives in app/service.py (issue #35 extraction), so it resolves
+    # grep_search/symbol_search from THAT module's globals -- patch service.*, not main.*.
+    monkeypatch.setattr(service, "grep_search", lambda *a, **k: result)
+    monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
     engine = _FakeEngine([_FakeResult([_Row(id=7, name="acme/widgets")])])
 
     payload = main._search_code_payload(engine, _cfg(), "foo", 50)

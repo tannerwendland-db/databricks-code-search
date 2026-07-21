@@ -19,11 +19,13 @@ import json
 import time
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import Text, any_, func, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.engine import Engine
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.config import Settings
-from app.db.models import File, Repo
+from app.db.models import File, Repo, RepoBranch
 from app.query.parser import And, Node, Or, QueryParseError, SymbolFilter, parse
 from app.search.errors import QueryTooBroadError
 from app.search.grep import FileCursor, grep_search
@@ -62,8 +64,9 @@ class CursorError(ValueError):
 def encode_cursor(file_cursor: FileCursor) -> str:
     """Encode a :class:`FileCursor` as an opaque base64url cursor string.
 
-    Wire format: ``{"v": 1, "r": <repo_id>, "p": <path>, "s": <content_sha>}``, compact-JSON then base64url
-    WITHOUT padding (stripped ``=``; :func:`decode_cursor` re-pads before decoding). Opaque to
+    Wire format: ``{"v": 1, "r": <repo_id>, "p": <path>, "s": <content_sha>}``, compact-JSON
+    then base64url WITHOUT padding (stripped ``=``; :func:`decode_cursor` re-pads before
+    decoding). Opaque to
     every caller by contract -- callers only ever round-trip it back through
     :func:`decode_cursor`/``search_code_payload(cursor=...)``, never parse it themselves.
     """
@@ -206,8 +209,12 @@ def search_code_payload(
     """Run grep + symbol search and shape the merged result to the zoekt parity envelope.
 
     Content matches (grep) and ``sym:`` definition matches (:func:`symbol_search`) are folded
-    into one ``files`` -> ``matches`` list grouped by ``(repo_id, path)``, matching zoekt's
-    single-tool model where ``sym:`` results ride the normal envelope. A symbol match carries
+    into one ``files`` -> ``matches`` list grouped by ``(repo_id, path, content_sha)`` (0003:
+    a path may have more than one indexed content version, one per divergent branch group, so
+    the merge key includes ``content_sha`` to keep them as distinct file entries -- each
+    carrying its own real ``branches`` membership array instead of the old hardcoded
+    ``["HEAD"]``), matching zoekt's single-tool model where ``sym:`` results ride the normal
+    envelope. A symbol match carries
     ``symbols: [{name, kind}]`` and ``line`` = the definition's first line (no highlight ``text``
     in V1, so ``grep_search("sym:X")`` -- which returns nothing highlight-driven -- is answered
     here). ``QueryParseError`` -> ``query_parse_error`` + empty files; ``QueryTooBroadError``
@@ -340,19 +347,30 @@ def search_code_payload(
                 )
                 name_map = _repo_name_map(conn)
 
-    # Merge content + symbol matches into one file list grouped by (repo_id, path).
-    merged: dict[tuple[int, str], dict[str, Any]] = {}
+    # Merge content + symbol matches into one file list grouped by (repo_id, path, content_sha)
+    # (0003: content_sha disambiguates divergent branch content versions of one path).
+    merged: dict[tuple[int, str, str], dict[str, Any]] = {}
 
-    def _entry(repo_id: int, path: str, lang: str | None) -> dict[str, Any]:
-        entry = merged.get((repo_id, path))
+    def _entry(
+        repo_id: int, path: str, lang: str | None, content_sha: str, branches: tuple[str, ...]
+    ) -> dict[str, Any]:
+        key = (repo_id, path, content_sha)
+        entry = merged.get(key)
         if entry is None:
-            entry = {"repo_id": repo_id, "path": path, "lang": lang, "matches": []}
-            merged[(repo_id, path)] = entry
+            entry = {
+                "repo_id": repo_id,
+                "path": path,
+                "lang": lang,
+                "content_sha": content_sha,
+                "branches": branches,
+                "matches": [],
+            }
+            merged[key] = entry
         return entry
 
     match_count = 0
     for fm in result.files:
-        entry = _entry(fm.repo_id, fm.path, fm.lang)
+        entry = _entry(fm.repo_id, fm.path, fm.lang, fm.content_sha, fm.branches)
         for lm in fm.line_matches:
             entry["matches"].append(
                 {
@@ -367,7 +385,7 @@ def search_code_payload(
 
     if sym_result is not None:
         for sm in sym_result.symbols:
-            entry = _entry(sm.repo_id, sm.path, sm.lang)
+            entry = _entry(sm.repo_id, sm.path, sm.lang, sm.content_sha, sm.branches)
             entry["matches"].append(
                 {
                     "line": sm.start_line,
@@ -379,7 +397,7 @@ def search_code_payload(
             match_count += 1  # each symbol definition is one match (its byte_ranges is empty)
 
     files: list[dict[str, Any]] = []
-    for entry in sorted(merged.values(), key=lambda e: (e["repo_id"], e["path"])):
+    for entry in sorted(merged.values(), key=lambda e: (e["repo_id"], e["path"], e["content_sha"])):
         # Order matches within a file by line; NULL symbol lines sort last.
         entry["matches"].sort(key=lambda m: (m["line"] is None, m["line"] or 0))
         files.append(
@@ -387,7 +405,7 @@ def search_code_payload(
                 "repo": name_map.get(entry["repo_id"], str(entry["repo_id"])),
                 "file": entry["path"],
                 "language": entry["lang"],
-                "branches": ["HEAD"],  # durable core has no per-branch content
+                "branches": list(entry["branches"]),  # real membership (0003), not hardcoded
                 "matches": entry["matches"],
             }
         )
@@ -448,7 +466,17 @@ def search_code_payload(
 
 
 def list_repos_payload(engine: Engine, cfg: Settings) -> dict[str, Any]:
-    """List indexed repos with metadata, bounded by a transaction-local statement_timeout."""
+    """List indexed repos with metadata, bounded by a transaction-local statement_timeout.
+
+    Branches are enumerated from ``repo_branches`` (0003) -- the authoritative per-branch
+    registry -- rather than guessed from the single ``repos.default_branch`` stamp, so a repo
+    indexed on multiple branches reports all of them. ``branches`` stays a flat name list, the
+    SAME shape as the old hardcoded single-element list, so a single-branch repo still renders
+    an array of one (additive-only: no existing key removed or reshaped). Per-branch detail
+    (``last_indexed_commit``/``index_time``) is carried in the new ``branch_details`` list; the
+    top-level ``index_time``/``last_indexed_commit`` mirror the repo's default-branch row
+    (falling back to the first enumerated branch if the default itself was never indexed).
+    """
     with engine.connect() as conn:
         with conn.begin():
             # SET LOCAL (int-coerced -> injection-safe) is transaction-scoped, so it never
@@ -456,35 +484,97 @@ def list_repos_payload(engine: Engine, cfg: Settings) -> dict[str, Any]:
             conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}")
             rows = conn.execute(
                 select(
+                    Repo.id,
                     Repo.name,
                     Repo.default_branch,
-                    Repo.last_indexed_at,
-                    Repo.last_indexed_commit,
-                ).order_by(Repo.name)
+                    RepoBranch.branch,
+                    RepoBranch.last_indexed_commit,
+                    RepoBranch.last_indexed_at,
+                )
+                .select_from(Repo)
+                .outerjoin(RepoBranch, RepoBranch.repo_id == Repo.id)
+                .order_by(Repo.name, RepoBranch.branch)
             ).all()
-    repos = [
-        {
-            "name": row.name,
-            "branches": [row.default_branch] if row.default_branch else ["HEAD"],
-            "index_time": row.last_indexed_at.isoformat() if row.last_indexed_at else None,
-            "default_branch": row.default_branch,
-            "last_indexed_commit": row.last_indexed_commit,
-        }
-        for row in rows
-    ]
+
+    grouped: dict[int, dict[str, Any]] = {}
+    order: list[int] = []
+    for row in rows:
+        entry = grouped.get(row.id)
+        if entry is None:
+            entry = {"name": row.name, "default_branch": row.default_branch, "branch_rows": []}
+            grouped[row.id] = entry
+            order.append(row.id)
+        if row.branch is not None:
+            entry["branch_rows"].append(
+                {
+                    "branch": row.branch,
+                    "last_indexed_commit": row.last_indexed_commit,
+                    "index_time": row.last_indexed_at.isoformat() if row.last_indexed_at else None,
+                }
+            )
+
+    repos: list[dict[str, Any]] = []
+    for repo_id in order:
+        entry = grouped[repo_id]
+        branch_rows: list[dict[str, Any]] = entry["branch_rows"]
+        default = entry["default_branch"] or "HEAD"
+        default_row = next((b for b in branch_rows if b["branch"] == default), None)
+        if default_row is None and branch_rows:
+            default_row = branch_rows[0]
+        repos.append(
+            {
+                "name": entry["name"],
+                "branches": [b["branch"] for b in branch_rows] or ["HEAD"],
+                "index_time": default_row["index_time"] if default_row else None,
+                "default_branch": entry["default_branch"],
+                "last_indexed_commit": default_row["last_indexed_commit"] if default_row else None,
+                "branch_details": branch_rows,
+            }
+        )
     return {"repos": repos, "count": len(repos)}
 
 
-def get_file_payload(engine: Engine, cfg: Settings, repo: str, path: str) -> dict[str, Any]:
-    """Fetch one file's full content by (repo name, path); a miss is a structured signal."""
+def get_file_payload(
+    engine: Engine, cfg: Settings, repo: str, path: str, branch: str | None = None
+) -> dict[str, Any]:
+    """Fetch one file's full content by (repo name, path), scoped to one content version.
+
+    A path may now have more than one indexed content version (0003: one per divergent branch
+    group), so the predicate MUST resolve to <=1 row per ``(repo, path)``: an explicit
+    ``branch`` uses the GIN-served exact-membership operator ``branches @> ARRAY[:branch]``
+    (Option C1, the same as the query compiler's ``branch:`` lowering); omitted, it falls back
+    to the correlated ``coalesce(repos.default_branch, 'HEAD') = ANY(files.branches)`` --
+    byte-identical to the compiler's implicit default conjunct, the ``0003`` backfill, and the
+    semantic default leg. A branch name is a member of at most one content version of a given
+    path (a branch points at one tree), so both predicates keep the single-row guarantee
+    ``scalar_one_or_none()`` relies on -- a second row would raise ``MultipleResultsFound``,
+    signalling the guarantee broke rather than a bug here. Returns the RESOLVED ``branch``
+    (the given branch, or the repo's real default/`'HEAD'`) instead of the old hardcoded
+    ``"HEAD"``; a miss stays a structured ``found: False``.
+    """
     with engine.connect() as conn:
         with conn.begin():
             conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}")
+            predicate: ColumnElement[bool]
+            if branch is not None:
+                predicate = File.branches.op("@>")(literal([branch], type_=ARRAY(Text)))
+                resolved_branch = branch
+            else:
+                default_branch = conn.execute(
+                    select(func.coalesce(Repo.default_branch, "HEAD")).where(Repo.name == repo)
+                ).scalar_one_or_none()
+                resolved_branch = default_branch or "HEAD"
+                predicate = func.coalesce(Repo.default_branch, "HEAD") == any_(File.branches)
             content = conn.execute(
                 select(File.content)
                 .join(Repo, File.repo_id == Repo.id)
-                .where(Repo.name == repo, File.path == path)
+                .where(Repo.name == repo, File.path == path, predicate)
             ).scalar_one_or_none()
-    if content is None:
-        return {"repo": repo, "path": path, "branch": "HEAD", "content": None, "found": False}
-    return {"repo": repo, "path": path, "branch": "HEAD", "content": content, "found": True}
+    found = content is not None
+    return {
+        "repo": repo,
+        "path": path,
+        "branch": resolved_branch,
+        "content": content,
+        "found": found,
+    }

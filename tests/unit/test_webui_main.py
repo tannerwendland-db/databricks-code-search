@@ -121,6 +121,8 @@ def _grep_result(*, next_cursor: FileCursor | None = None) -> GrepResult:
                 repo_id=7,
                 path="src/handler.go",
                 lang="go",
+                content_sha="deadbeef",
+                branches=("main",),
                 line_matches=(
                     LineMatch(line_number=3, line_text="foo lives here", byte_ranges=((0, 3),)),
                 ),
@@ -199,7 +201,7 @@ def test_ready_returns_503_when_probe_fails() -> None:
 def test_api_search_wire_shape_includes_next_cursor(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cursor = FileCursor(repo_id=7, path="src/handler.go")
+    cursor = FileCursor(repo_id=7, path="src/handler.go", content_sha="deadbeef")
     monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep_result(next_cursor=cursor))
 
     resp = client.get("/api/search", params={"q": "foo"})
@@ -269,7 +271,7 @@ def test_api_search_nul_byte_in_cursor_path_is_400(
         raise _NUL_BYTE_ERROR
 
     monkeypatch.setattr(service, "grep_search", _raise)
-    cursor = service.encode_cursor(FileCursor(repo_id=1, path="foo\x00bar"))
+    cursor = service.encode_cursor(FileCursor(repo_id=1, path="foo\x00bar", content_sha="deadbeef"))
 
     resp = client.get("/api/search", params={"q": "foo", "cursor": cursor})
 
@@ -282,7 +284,8 @@ def test_api_search_nul_byte_in_cursor_path_is_400(
 
 @pytest.mark.unit
 def test_api_file_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = _FakeEngine([_FakeResult(["print('hi')\n"])])
+    # branch=None: two queries -- the coalesced default_branch lookup, then the content lookup.
+    engine = _FakeEngine([_FakeResult(["HEAD"]), _FakeResult(["print('hi')\n"])])
     app.dependency_overrides[get_engine] = lambda: engine
     app.dependency_overrides[get_settings] = _cfg
     try:
@@ -299,7 +302,8 @@ def test_api_file_found(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.unit
 def test_api_file_missing_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = _FakeEngine([_FakeResult([])])  # scalar_one_or_none() -> None
+    # Two queries (default_branch lookup, then content lookup); both miss -> None.
+    engine = _FakeEngine([_FakeResult([]), _FakeResult([])])  # scalar_one_or_none() -> None
     app.dependency_overrides[get_engine] = lambda: engine
     app.dependency_overrides[get_settings] = _cfg
     try:
@@ -344,10 +348,12 @@ def test_api_repos_lists_indexed_repos() -> None:
             _FakeResult(
                 [
                     _Row(
+                        id=1,
                         name="acme/widgets",
                         default_branch="main",
-                        last_indexed_at=None,
+                        branch="main",
                         last_indexed_commit="deadbeef",
+                        last_indexed_at=None,
                     )
                 ]
             )

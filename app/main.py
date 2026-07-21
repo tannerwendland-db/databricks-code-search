@@ -156,6 +156,16 @@ _list_repos_payload = service.list_repos_payload
 _get_file_payload = service.get_file_payload
 
 
+def _append_branch_atom(query: str, branch: str) -> str:
+    """Append ``branch:"<branch>"`` to ``query`` (0003): the ``search_code`` ``branch`` param
+    is sugar for the ``branch:`` query atom, quoted so ``/``, ``.``, and rare spaces are
+    scanner-safe. ``app.query.parser._read_quoted`` only special-cases ``\\"`` -> ``"``, so
+    the sole character that needs escaping here is an embedded ``"``.
+    """
+    escaped = branch.replace('"', '\\"')
+    return f'{query} branch:"{escaped}"'.strip()
+
+
 # ------------------------------------------------------------------------------- lifespan
 
 
@@ -181,53 +191,69 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
 # future multi-mount) get its own session manager instead of reusing a spent one.
 
 
-async def search_code(query: str, ctx: Context, limit: int = 200) -> str:
+async def search_code(query: str, ctx: Context, limit: int = 200, branch: str | None = None) -> str:
     """Search the indexed corpus with a zoekt-style query; returns file-grouped line matches.
 
-    Supports ``repo:``/``file:``/``lang:``/``sym:`` filters, ``case:yes``, boolean AND
-    (whitespace) / OR, and ``/regex/`` patterns. ``limit`` caps the number of files scanned
-    (clamped to a server maximum). Recoverable conditions surface as fields
-    (``query_parse_error``, ``query_too_broad``, ``truncated``, ``regex_incompatible``,
-    ``no_content_atom``, ``zero_width_only_atoms``). The last two explain an empty result that
-    is NOT a true negative: the query carried no content atom to highlight (e.g. ``lang:go``
-    alone) or every atom it carried matches zero-width (e.g. ``/^/``).
+    Supports ``repo:``/``file:``/``lang:``/``sym:``/``branch:`` filters, ``case:yes``, boolean
+    AND (whitespace) / OR, and ``/regex/`` patterns. Without ``branch:`` (or the ``branch``
+    param below), results are scoped to each repo's default branch. ``branch:<name>`` restricts
+    to files whose indexed branches include ``<name>`` (exact match, not a glob/regex).
+    ``branch`` is a convenience param equivalent to appending ``branch:"<value>"`` to ``query``.
+    ``limit`` caps the number of files scanned (clamped to a server maximum). Recoverable
+    conditions surface as fields (``query_parse_error``, ``query_too_broad``, ``truncated``,
+    ``regex_incompatible``, ``no_content_atom``, ``zero_width_only_atoms``). The last two
+    explain an empty result that is NOT a true negative: the query carried no content atom to
+    highlight (e.g. ``lang:go`` alone) or every atom it carried matches zero-width (e.g. ``/^/``).
     """
     lc = ctx.request_context.lifespan_context
     engine, cfg = lc["engine"], lc["config"]
     limit = _clamp_limit(limit, cfg)
+    if branch:
+        query = _append_branch_atom(query, branch)
     return await _dispatch("search_code", lambda: _search_code_payload(engine, cfg, query, limit))
 
 
-async def semantic_search(query: str, ctx: Context, limit: int = 50) -> str:
+async def semantic_search(
+    query: str, ctx: Context, limit: int = 50, branch: str | None = None
+) -> str:
     """Semantic + BM25 hybrid search: rank indexed chunks by relevance to a free-text query.
 
     Unlike :func:`search_code` (zoekt grammar over lines), this takes a natural-language
     ``query`` and returns chunk-level results fused from a vector-ANN leg and a BM25 leg via
-    reciprocal-rank fusion. ``limit`` caps the number of ranked chunks returned (clamped to a
-    server maximum). Registered unconditionally, but gated at runtime: when semantic search is
-    disabled (the default) it returns a clean ``semantic_enabled: false`` payload -- never a
-    500/503 -- and touches neither the database nor the embedder. Each result carries ``repo``,
-    ``file``, ``chunk_index``, ``content``, and ``rrf_score`` (no precise line range in V1).
+    reciprocal-rank fusion. ``branch`` scopes results to files whose indexed branches include
+    the given name (exact match, threaded straight to the SQL predicate -- NOT appended to
+    ``query``, since this tool takes natural language rather than zoekt grammar); omitted,
+    results are scoped to each repo's default branch. ``limit`` caps the number of ranked
+    chunks returned (clamped to a server maximum). Registered unconditionally, but gated at
+    runtime: when semantic search is disabled (the default) it returns a clean
+    ``semantic_enabled: false`` payload -- never a 500/503 -- and touches neither the database
+    nor the embedder. Each result carries ``repo``, ``file``, ``chunk_index``, ``content``, and
+    ``rrf_score`` (no precise line range in V1).
     """
     lc = ctx.request_context.lifespan_context
     engine, cfg = lc["engine"], lc["config"]
     limit = _clamp_limit(limit, cfg)
     return await _dispatch(
-        "semantic_search", lambda: _semantic_search_payload(engine, cfg, query, limit)
+        "semantic_search", lambda: _semantic_search_payload(engine, cfg, query, limit, branch)
     )
 
 
 async def list_repos(ctx: Context) -> str:
-    """List every indexed repository with its branch and last-indexed metadata."""
+    """List every indexed repository with its branches and per-branch last-indexed metadata."""
     lc = ctx.request_context.lifespan_context
     return await _dispatch("list_repos", lambda: _list_repos_payload(lc["engine"], lc["config"]))
 
 
-async def get_file(repo: str, path: str, ctx: Context) -> str:
-    """Return the full content of a file by repository name and path (miss -> ``found:false``)."""
+async def get_file(repo: str, path: str, ctx: Context, branch: str | None = None) -> str:
+    """Return the full content of a file by repository name and path (miss -> ``found:false``).
+
+    ``branch`` scopes the lookup to the content version indexed on that branch (0003: one path
+    may have several); omitted, it resolves to the repo's default branch. The RESOLVED branch
+    is echoed back in the payload.
+    """
     lc = ctx.request_context.lifespan_context
     return await _dispatch(
-        "get_file", lambda: _get_file_payload(lc["engine"], lc["config"], repo, path)
+        "get_file", lambda: _get_file_payload(lc["engine"], lc["config"], repo, path, branch)
     )
 
 
