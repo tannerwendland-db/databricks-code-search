@@ -46,7 +46,7 @@ from sqlalchemy.sql.elements import TextClause
 from app.config import Settings
 
 if TYPE_CHECKING:
-    from indexer.embed import EmbedFn
+    from app.embed import EmbedFn
 
 # RRF and candidate-set defaults (plan REV 3): k=60 dampens the head of each rank list; each
 # leg contributes its top :topk index-accelerated candidates before fusion.
@@ -191,7 +191,7 @@ def get_embedder(cfg: Settings) -> EmbedFn:
     """Return the process-scoped query embedder, building it once (lazily, race-safe).
 
     Mirrors :func:`app.main.get_engine`: the first ENABLED call imports ``databricks-sdk``
-    (inside :func:`indexer.embed.databricks_embedder`) and constructs the serving-endpoint
+    (inside :func:`app.embed.databricks_embedder`) and constructs the serving-endpoint
     client; a double-checked ``threading.Lock`` makes a first-build race between two MCP
     sessions safe. Never reached on the flag-off path (the payload builder short-circuits
     first), so importing this module / calling ``semantic_search`` disabled never touches the
@@ -201,7 +201,7 @@ def get_embedder(cfg: Settings) -> EmbedFn:
     if _embedder is None:
         with _embedder_lock:
             if _embedder is None:
-                from indexer.embed import get_embedder as build_embedder  # lazy: SDK import
+                from app.embed import get_embedder as build_embedder  # lazy: SDK import
 
                 _embedder = build_embedder(cfg)
     return _embedder

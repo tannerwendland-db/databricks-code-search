@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     semantic_enabled: bool = True
 
     # AI Gateway MLflow embeddings route (a workspace-relative API path, NOT a serving
-    # endpoint name). indexer/embed.py POSTs {"model": ..., "input": ...} to it via the
+    # endpoint name). app/embed.py POSTs {"model": ..., "input": ...} to it via the
     # SDK's raw API client. A working default is required: with the flag on by default,
     # an unset endpoint would raise at MCP query time.
     semantic_embedding_endpoint: str | None = "/ai-gateway/mlflow/v1/embeddings"

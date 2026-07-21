@@ -8,7 +8,7 @@ and reinserts the current set -- idempotent, and safe to call repeatedly
 within the same per-file loop.
 
 This module never calls the embedder: ``chunks`` arrives with vectors already
-computed by :mod:`indexer.embed`, so writing them is pure DML with no network
+computed by :mod:`app.embed`, so writing them is pure DML with no network
 call inside the caller's lock window (issue #14 A4). ``ts`` is a ``GENERATED``
 column in production (backed by the beta ``lakebase_text`` extension) and is
 therefore never written here -- it derives from ``content``.

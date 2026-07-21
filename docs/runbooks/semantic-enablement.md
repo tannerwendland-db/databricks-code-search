@@ -82,7 +82,7 @@ visible (and vice versa) — easy to mistake for a bug.
 
 Embeddings go through the workspace AI Gateway MLflow embeddings route
 (`POST /ai-gateway/mlflow/v1/embeddings`, default model `system.ai.gte-large-en`,
-1024-dim), via the SDK's workspace-authenticated raw API client (`indexer/embed.py`).
+1024-dim), via the SDK's workspace-authenticated raw API client (`app/embed.py`).
 No model-serving endpoint needs to be provisioned. Overrides:
 `CODE_SEARCH_SEMANTIC_EMBEDDING_ENDPOINT` (route path) and
 `CODE_SEARCH_SEMANTIC_EMBEDDING_MODEL` — a model with a different dimension trips the

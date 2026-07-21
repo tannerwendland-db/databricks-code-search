@@ -48,7 +48,7 @@ embedded -- but OUTSIDE ``index_repo``'s transaction (A4): the embedder is calle
 here, up front, and only a ``chunk_writer`` closure over the precomputed vectors
 is handed to ``index_repo``, which writes them (pure DML, no network) inside the
 same per-file loop as symbols. Flag-off: no chunking, no embedder, no import of
-``indexer.embed``'s lazy ``databricks-sdk`` dependency.
+``app.embed``'s lazy ``databricks-sdk`` dependency.
 
 Logging is INFO only. The GitHub token is read via an injected client and is never
 logged, and this module never lowers root/SDK/httpx log levels (see the redaction
@@ -77,9 +77,9 @@ from sqlalchemy import select
 from app.config import Settings, get_settings
 from app.db.client import create_db_engine
 from app.db.models import INDEX_SEMANTICS_VERSION, Repo, RepoBranch
+from app.embed import EmbeddingCountMismatchError, EmbedFn, get_embedder
 from indexer.branches import resolve_branches
 from indexer.chunk_store import write_chunks
-from indexer.embed import EmbeddingCountMismatchError, EmbedFn, get_embedder
 from indexer.fetch import (
     REQUIRED_FREE_BYTES,
     assert_disk_headroom,
@@ -116,7 +116,7 @@ class BranchOutcome:
 
 
 # Per-repo log context. Set by _index_one so that records emitted by
-# indexer.fetch / indexer.store / indexer.embed -- which carry no repo name of
+# indexer.fetch / indexer.store / app.embed -- which carry no repo name of
 # their own -- stay attributable once several repos interleave under fan-out.
 # Default "-" covers every record emitted outside a worker (resolution, the
 # main-thread drain loop, third-party libraries).
