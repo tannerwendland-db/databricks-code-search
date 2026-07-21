@@ -21,6 +21,8 @@ describe("recognize", () => {
     "repo:acme branch:or",
     "sym:Handler",
     "file:*.py",
+    "commit:abc1234",
+    "repo:acme commit:abc1234 foo",
   ])("classifies %j as safe", (query) => {
     expect(recognize(query).safe).toBe(true);
   });
@@ -79,6 +81,20 @@ describe("recognize", () => {
     expect(model.safe).toBe(true);
     if (model.safe) expect(model.atoms).toContainEqual({ field: "branch", value: "or", start: 10, end: 19 });
   });
+
+  it("parses a `commit:` atom as a free-text field", () => {
+    const model = recognize("commit:abc1234");
+    expect(model.safe).toBe(true);
+    if (model.safe) expect(model.atoms).toEqual([{ field: "commit", value: "abc1234", start: 0, end: 14 }]);
+  });
+
+  it("allows a commit atom alongside other atoms", () => {
+    const model = recognize("repo:acme commit:abc1234 foo");
+    expect(model.safe).toBe(true);
+    if (model.safe) expect(model.atoms.filter((a) => a.field === "commit")).toEqual([
+      { field: "commit", value: "abc1234", start: 10, end: 24 },
+    ]);
+  });
 });
 
 describe("deriveChips", () => {
@@ -119,6 +135,12 @@ describe("deriveChips", () => {
   it("disables everything for an unsafe query", () => {
     const chips = deriveChips(recognize("(foo)"), REPOS);
     expect(chips).toEqual({ editable: false, repoActive: null, langActive: null, branch: { available: false, options: [], active: null } });
+  });
+
+  it("derives no chip state from a commit atom -- commits are free-text, never enumerable", () => {
+    const withCommit = deriveChips(recognize("repo:acme commit:abc1234 foo"), REPOS);
+    const withoutCommit = deriveChips(recognize("repo:acme foo"), REPOS);
+    expect(withCommit).toEqual(withoutCommit);
   });
 });
 
@@ -194,5 +216,21 @@ describe("editors", () => {
     const model = recognize("repo:acme");
     const next = model.safe ? toggleBranchAtom(model, "feature/x") : "";
     expect(recognize(next).safe).toBe(true);
+  });
+
+  it("appends a commit atom via setFieldAtom and round-trips through re-recognition", () => {
+    const model = recognize("repo:acme foo");
+    const next = model.safe ? setFieldAtom(model, "commit", "abc1234") : "";
+    expect(next).toBe("repo:acme foo commit:abc1234");
+    const reParsed = recognize(next);
+    expect(reParsed.safe).toBe(true);
+    if (reParsed.safe) {
+      expect(reParsed.atoms).toContainEqual({ field: "commit", value: "abc1234", start: 14, end: 28 });
+    }
+  });
+
+  it("clears a commit atom entirely when toggled off via setFieldAtom(null)", () => {
+    const model = recognize("commit:abc1234 foo");
+    expect(model.safe && setFieldAtom(model, "commit", null)).toBe("foo");
   });
 });

@@ -20,7 +20,6 @@ from sqlalchemy.exc import DataError
 
 from app import service
 from app.config import Settings
-from app.query.parser import QueryParseError
 from app.search.grep import FileCursor, FileMatches, GrepResult, LineMatch
 from webui.main import app, get_engine, get_settings
 
@@ -230,21 +229,15 @@ def test_api_search_exhausted_page_has_null_next_cursor(
 
 
 @pytest.mark.unit
-def test_api_search_query_parse_error_is_400(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # service.search_code_payload catches QueryParseError INTERNALLY and folds it into the
-    # payload's query_parse_error field (never raises it out -- see webui/main.py:api_search's
-    # docstring), so the route's 400 mapping is driven by that stubbed grep_search raising it.
-    def _raise(*_a: object, **_k: object) -> GrepResult:
-        raise QueryParseError("bad query", 3)
-
-    monkeypatch.setattr(service, "grep_search", _raise)
-
+def test_api_search_query_parse_error_is_400(client: TestClient) -> None:
+    # service.search_code_payload parses up front and folds any QueryParseError into the payload's
+    # query_parse_error field (never raises it out -- see webui/main.py:api_search's docstring), so
+    # the route's 400 mapping is driven by that field. `case:` accepts only yes/no, so `case:maybe`
+    # is a genuine parse error and no leg ever runs.
     resp = client.get("/api/search", params={"q": "case:maybe"})
 
     assert resp.status_code == 400
-    assert resp.json()["detail"]["error"] == "bad query"
+    assert "case:" in resp.json()["detail"]["error"]
 
 
 @pytest.mark.unit
@@ -284,8 +277,11 @@ def test_api_search_nul_byte_in_cursor_path_is_400(
 
 @pytest.mark.unit
 def test_api_file_found(monkeypatch: pytest.MonkeyPatch) -> None:
-    # branch=None: two queries -- the coalesced default_branch lookup, then the content lookup.
-    engine = _FakeEngine([_FakeResult(["HEAD"]), _FakeResult(["print('hi')\n"])])
+    # branch=None: three queries -- default_branch lookup, content lookup, then the resolved
+    # branch's indexed-commit lookup.
+    engine = _FakeEngine(
+        [_FakeResult(["HEAD"]), _FakeResult(["print('hi')\n"]), _FakeResult(["abc1234"])]
+    )
     app.dependency_overrides[get_engine] = lambda: engine
     app.dependency_overrides[get_settings] = _cfg
     try:
@@ -298,12 +294,13 @@ def test_api_file_found(monkeypatch: pytest.MonkeyPatch) -> None:
     assert body["found"] is True
     assert body["content"] == "print('hi')\n"
     assert body["branch"] == "HEAD"
+    assert body["commit"] == "abc1234"
 
 
 @pytest.mark.unit
 def test_api_file_missing_is_404(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Two queries (default_branch lookup, then content lookup); both miss -> None.
-    engine = _FakeEngine([_FakeResult([]), _FakeResult([])])  # scalar_one_or_none() -> None
+    # Three queries (default_branch lookup, content lookup, commit lookup); all miss -> None.
+    engine = _FakeEngine([_FakeResult([]), _FakeResult([]), _FakeResult([])])
     app.dependency_overrides[get_engine] = lambda: engine
     app.dependency_overrides[get_settings] = _cfg
     try:

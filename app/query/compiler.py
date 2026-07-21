@@ -50,13 +50,14 @@ from __future__ import annotations
 from typing import assert_never
 
 from sqlalchemy import Select, Text, and_, any_, exists, func, literal, or_, select
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, array
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.db.models import File, Repo, Symbol
+from app.db.models import File, Repo, RepoBranch, Symbol
 from app.query.parser import (
     And,
     BranchFilter,
+    CommitFilter,
     LangFilter,
     Node,
     Or,
@@ -82,7 +83,10 @@ def _has_branch_filter(node: Node) -> bool:
     already stated which branch(es) they want.
     """
     match node:
-        case BranchFilter():
+        case BranchFilter() | CommitFilter():
+            # A commit scope IS a branch scope (it resolves to specific repo/branch heads), so it
+            # opts the query out of the implicit default-branch conjunct too -- without this a
+            # commit resolving to a non-default branch would silently intersect to zero rows.
             return True
         case And(children=children) | Or(children=children):
             return any(_has_branch_filter(child) for child in children)
@@ -152,7 +156,14 @@ def _global_case(node: Node) -> bool:
             return cs
         case And(children=children) | Or(children=children):
             return any(_global_case(child) for child in children)
-        case RepoFilter() | PathFilter() | LangFilter() | SymbolFilter() | BranchFilter():
+        case (
+            RepoFilter()
+            | PathFilter()
+            | LangFilter()
+            | SymbolFilter()
+            | BranchFilter()
+            | CommitFilter()
+        ):
             return False
         case _:
             assert_never(node)
@@ -193,6 +204,21 @@ def _lower(node: Node, cs: bool) -> ColumnElement[bool]:
             # GIN-served exact membership (Option C1) -- explicit branch: opts out of the
             # implicit default-branch conjunct (see compile_query / _has_branch_filter).
             return File.branches.op("@>")(literal([v], type_=ARRAY(Text)))
+        case CommitFilter(value=prefix):
+            # Resolve the hex prefix through repo_branches (the ONLY commit truth-source; never
+            # files.commit) to the (repo, branch) heads it names, and scope to files on those
+            # branches: EXISTS a repo_branches row for THIS file's repo whose branch this file
+            # carries and whose last_indexed_commit starts with the prefix. `literal(prefix)` is a
+            # per-node auto-named bind, so `commit:a OR commit:b` never collide on one param name.
+            return exists(
+                select(RepoBranch.id).where(
+                    RepoBranch.repo_id == File.repo_id,
+                    File.branches.op("@>")(array([RepoBranch.branch])),
+                    func.lower(RepoBranch.last_indexed_commit).like(
+                        func.lower(literal(prefix)).concat("%")
+                    ),
+                )
+            )
         case And(children=children):
             return and_(*[_lower(child, cs) for child in children])
         case Or(children=children):

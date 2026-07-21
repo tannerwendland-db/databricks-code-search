@@ -116,7 +116,7 @@ export function SearchPage({ initialQuery }: { initialQuery: string }): JSX.Elem
         onToggleBranch={toggleBranch}
       />
 
-      <SearchBannerList banners={state.banners} />
+      <SearchBannerList banners={state.banners} query={state.query} />
 
       {state.status === "error" && <div className="banner error">{state.error}</div>}
 

@@ -84,6 +84,7 @@ from app.query.compiler import DEFAULT_ROW_LIMIT, compile_query
 from app.query.parser import (
     And,
     BranchFilter,
+    CommitFilter,
     LangFilter,
     Node,
     Or,
@@ -227,7 +228,14 @@ def _collect_matchers(node: Node, flags: int, patterns: list[re.Pattern[str]]) -
             for child in children:
                 incompatible = _collect_matchers(child, flags, patterns) or incompatible
             return incompatible
-        case RepoFilter() | PathFilter() | LangFilter() | SymbolFilter() | BranchFilter():
+        case (
+            RepoFilter()
+            | PathFilter()
+            | LangFilter()
+            | SymbolFilter()
+            | BranchFilter()
+            | CommitFilter()
+        ):
             return False
         case _:
             assert_never(node)

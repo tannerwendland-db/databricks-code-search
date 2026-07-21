@@ -34,6 +34,7 @@ Contract / divergence notes (load-bearing for #9 and future work):
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TypeAlias
@@ -94,6 +95,16 @@ class BranchFilter:
 
 
 @dataclass(frozen=True)
+class CommitFilter:
+    """``commit:<hash>`` -- restrict to files indexed at a git commit whose SHA starts with
+    ``value`` (hex prefix, 7--40 chars, already lowercased + validated here). #9 lowers it to an
+    ``EXISTS`` against ``repo_branches`` -- resolution reads ``last_indexed_commit`` only, NEVER
+    ``files.commit``."""
+
+    value: str
+
+
+@dataclass(frozen=True)
 class And:
     """N-ary conjunction. Invariant: ``len(children) >= 2``."""
 
@@ -116,6 +127,7 @@ Node: TypeAlias = (
     | LangFilter
     | SymbolFilter
     | BranchFilter
+    | CommitFilter
     | And
     | Or
 )
@@ -148,6 +160,7 @@ class TokenKind(Enum):
     LANG = auto()
     SYMBOL = auto()
     BRANCH = auto()
+    COMMIT = auto()
     CASE = auto()  # value is "yes" or "no"; a zero-real-term operand (query-global flag)
 
 
@@ -164,7 +177,7 @@ class Token:
 
 _WHITESPACE = frozenset(" \t\n")
 _BAREWORD_STOP = frozenset(" \t\n()")
-_SUPPORTED = frozenset({"repo", "file", "lang", "sym", "case", "branch"})
+_SUPPORTED = frozenset({"repo", "file", "lang", "sym", "case", "branch", "commit"})
 _RESERVED = frozenset({"content", "r", "f", "l", "b", "c", "s"})
 _FIELD_KINDS: dict[str, TokenKind] = {
     "repo": TokenKind.REPO,
@@ -172,7 +185,11 @@ _FIELD_KINDS: dict[str, TokenKind] = {
     "lang": TokenKind.LANG,
     "sym": TokenKind.SYMBOL,
     "branch": TokenKind.BRANCH,
+    "commit": TokenKind.COMMIT,
 }
+
+# A git object name: hex only, git's own >= 7-char abbreviation minimum, full SHA-1 max of 40.
+_COMMIT_HASH = re.compile(r"[0-9a-f]{7,40}")
 
 _MAX_DEPTH = 200
 
@@ -243,6 +260,15 @@ def _emit_field(field: str, value: str, start: int) -> Token:
         if value not in ("yes", "no"):
             raise QueryParseError(f"case: expects 'yes' or 'no', got '{value}'", start)
         return Token(TokenKind.CASE, value, start)
+    if field == "commit":
+        # Case-normalize then validate: git SHAs are lowercase hex, so an upper/mixed-case input
+        # is normalized (not rejected) before the hex/length check gates the token.
+        normalized = value.lower()
+        if not _COMMIT_HASH.fullmatch(normalized):
+            raise QueryParseError(
+                f"commit: expects a hex git hash of 7-40 chars, got '{value}'", start
+            )
+        return Token(TokenKind.COMMIT, normalized, start)
     return Token(_FIELD_KINDS[field], value, start)
 
 
@@ -419,6 +445,8 @@ class _Parser:
             return SymbolFilter(tok.value)
         if kind == TokenKind.BRANCH:
             return BranchFilter(tok.value)
+        if kind == TokenKind.COMMIT:
+            return CommitFilter(tok.value)
         # kind == TokenKind.CASE
         return _CASE_MARKER
 

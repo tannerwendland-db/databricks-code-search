@@ -25,6 +25,21 @@ export interface SearchFile {
   content_sha: string;
   permalink_branch: string | null;
   matches: SearchMatch[];
+  // Indexed commit for permalink_branch, sourced from repo_branches (never files.commit) --
+  // present only when the search scope resolved to specific branch(es) (commit-scoped or
+  // explicit branch: queries); absent for unscoped searches (ralplan-commit-hash-search step 7).
+  commit?: string | null;
+}
+
+// A `commit:` atom's resolution against repo_branches.last_indexed_commit -- one entry per
+// (repo, branch) pair whose indexed commit starts with the typed prefix. Never derived from
+// `files.commit` (see app/db/models.py's docstring); index_time mirrors the RepoInfo naming
+// (api/client.ts) even though the wire field is `index_time` on both.
+export interface ResolvedCommit {
+  repo: string;
+  branch: string;
+  commit: string;
+  index_time: string | null;
 }
 
 export interface SearchEnvelope {
@@ -41,6 +56,9 @@ export interface SearchEnvelope {
   no_content_atom: boolean;
   zero_width_only_atoms: boolean;
   next_cursor?: string | null;
+  // Present only for queries carrying a `commit:` atom (additive; omitted otherwise).
+  resolved?: ResolvedCommit[];
+  commit_not_indexed?: boolean;
 }
 
 export interface SearchBanners {
@@ -49,6 +67,8 @@ export interface SearchBanners {
   queryTooBroad: boolean;
   regexIncompatible: boolean;
   queryParseError: string | null;
+  resolved: ResolvedCommit[];
+  commitNotIndexed: boolean;
 }
 
 export type SearchStatus = "idle" | "loading" | "loading_more" | "error";
@@ -79,6 +99,8 @@ export const initialSearchState: SearchState = {
     queryTooBroad: false,
     regexIncompatible: false,
     queryParseError: null,
+    resolved: [],
+    commitNotIndexed: false,
   },
   error: null,
 };
@@ -98,6 +120,8 @@ function bannersFrom(payload: SearchEnvelope): SearchBanners {
     queryTooBroad: payload.query_too_broad,
     regexIncompatible: payload.regex_incompatible,
     queryParseError: payload.query_parse_error,
+    resolved: payload.resolved ?? [],
+    commitNotIndexed: payload.commit_not_indexed ?? false,
   };
 }
 

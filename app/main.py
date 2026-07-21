@@ -166,6 +166,15 @@ def _append_branch_atom(query: str, branch: str) -> str:
     return f'{query} branch:"{escaped}"'.strip()
 
 
+def _append_commit_atom(query: str, commit: str) -> str:
+    """Append ``commit:<hash>`` to ``query``: the ``search_code`` ``commit`` param is sugar for
+    the ``commit:`` atom, mirroring :func:`_append_branch_atom`. No quoting -- a git hash is hex
+    only (7--40 chars) and carries no scanner-special char; a malformed value is rejected by the
+    parser and surfaces as ``query_parse_error`` rather than an exception.
+    """
+    return f"{query} commit:{commit}".strip()
+
+
 # ------------------------------------------------------------------------------- lifespan
 
 
@@ -191,25 +200,43 @@ async def lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
 # future multi-mount) get its own session manager instead of reusing a spent one.
 
 
-async def search_code(query: str, ctx: Context, limit: int = 200, branch: str | None = None) -> str:
+async def search_code(
+    query: str,
+    ctx: Context,
+    limit: int = 200,
+    branch: str | None = None,
+    commit: str | None = None,
+) -> str:
     """Search the indexed corpus with a zoekt-style query; returns file-grouped line matches.
 
-    Supports ``repo:``/``file:``/``lang:``/``sym:``/``branch:`` filters, ``case:yes``, boolean
-    AND (whitespace) / OR, and ``/regex/`` patterns. Without ``branch:`` (or the ``branch``
-    param below), results are scoped to each repo's default branch. ``branch:<name>`` restricts
-    to files whose indexed branches include ``<name>`` (exact match, not a glob/regex).
-    ``branch`` is a convenience param equivalent to appending ``branch:"<value>"`` to ``query``.
-    ``limit`` caps the number of files scanned (clamped to a server maximum). Recoverable
-    conditions surface as fields (``query_parse_error``, ``query_too_broad``, ``truncated``,
-    ``regex_incompatible``, ``no_content_atom``, ``zero_width_only_atoms``). The last two
-    explain an empty result that is NOT a true negative: the query carried no content atom to
-    highlight (e.g. ``lang:go`` alone) or every atom it carried matches zero-width (e.g. ``/^/``).
+    Supports ``repo:``/``file:``/``lang:``/``sym:``/``branch:``/``commit:`` filters, ``case:yes``,
+    boolean AND (whitespace) / OR, and ``/regex/`` patterns. Without ``branch:``/``commit:`` (or
+    the params below), results are scoped to each repo's default branch. ``branch:<name>``
+    restricts to files whose indexed branches include ``<name>`` (exact match, not a glob/regex).
+
+    ``commit:<hash>`` scopes to whatever (repo, branch) heads are indexed at that git commit --
+    a full 40-char SHA or a hex prefix of >= 7 chars (matched git-style against
+    ``repo_branches.last_indexed_commit``). It has two moods: a bare ``commit:<hash>`` returns
+    only a ``resolved`` list (which repo/branch each match, plus the full SHA and index time) with
+    empty ``files`` -- a reverse lookup; ``commit:<hash> <terms>`` runs a normal search scoped to
+    the resolved heads and returns both ``files`` and ``resolved``. A hash that matches no indexed
+    branch returns empty ``files`` with ``commit_not_indexed: true`` (never an unfiltered search).
+
+    ``branch``/``commit`` are convenience params equivalent to appending ``branch:"<value>"`` /
+    ``commit:<value>`` to ``query``. ``limit`` caps the number of files scanned (clamped to a
+    server maximum). Recoverable conditions surface as fields (``query_parse_error``,
+    ``query_too_broad``, ``truncated``, ``regex_incompatible``, ``no_content_atom``,
+    ``zero_width_only_atoms``). The last two explain an empty result that is NOT a true negative:
+    the query carried no content atom to highlight (e.g. ``lang:go`` alone) or every atom it
+    carried matches zero-width (e.g. ``/^/``).
     """
     lc = ctx.request_context.lifespan_context
     engine, cfg = lc["engine"], lc["config"]
     limit = _clamp_limit(limit, cfg)
     if branch:
         query = _append_branch_atom(query, branch)
+    if commit:
+        query = _append_commit_atom(query, commit)
     return await _dispatch("search_code", lambda: _search_code_payload(engine, cfg, query, limit))
 
 
@@ -223,7 +250,11 @@ async def semantic_search(
     reciprocal-rank fusion. ``branch`` scopes results to files whose indexed branches include
     the given name (exact match, threaded straight to the SQL predicate -- NOT appended to
     ``query``, since this tool takes natural language rather than zoekt grammar); omitted,
-    results are scoped to each repo's default branch. ``limit`` caps the number of ranked
+    results are scoped to each repo's default branch. ``commit:`` is NOT supported here in v1
+    (the semantic path is a separate raw-SQL implementation and chunks carry no commit
+    provenance): a ``commit:<hash>`` appearing in ``query`` is treated as ordinary
+    natural-language text, never a filter -- use ``branch`` to scope, or :func:`search_code` for
+    commit-scoped lexical search. ``limit`` caps the number of ranked
     chunks returned (clamped to a server maximum). Registered unconditionally, but gated at
     runtime: when semantic search is explicitly disabled (``CODE_SEARCH_SEMANTIC_ENABLED=0``)
     it returns a clean ``semantic_enabled: false`` payload -- never a 500/503 -- and touches

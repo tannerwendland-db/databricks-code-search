@@ -12,6 +12,8 @@
   --banner-warn-fg: #6b4e00;
   --banner-error-bg: #fde2e1;
   --banner-error-fg: #7a1a15;
+  --banner-info-bg: #e3f5e8;
+  --banner-info-fg: #1f6b3a;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   color-scheme: light;
@@ -31,6 +33,8 @@
   --banner-warn-fg: #f0d371;
   --banner-error-bg: #3a1512;
   --banner-error-fg: #f3a29c;
+  --banner-info-bg: #113322;
+  --banner-info-fg: #7fd9a0;
   color-scheme: dark;
 }
 
@@ -49,6 +53,8 @@
     --banner-warn-fg: #f0d371;
     --banner-error-bg: #3a1512;
     --banner-error-fg: #f3a29c;
+    --banner-info-bg: #113322;
+    --banner-info-fg: #7fd9a0;
     color-scheme: dark;
   }
 }
@@ -219,6 +225,12 @@ details.syntax-help code {
   color: var(--banner-error-fg);
 }
 
+.banner.info {
+  background: var(--banner-info-bg);
+  color: var(--banner-info-fg);
+  font-family: var(--font-mono);
+}
+
 .result-summary {
   color: var(--fg-muted);
   font-size: 0.85rem;
@@ -246,6 +258,14 @@ details.syntax-help code {
 .result-file-header .lang {
   color: var(--fg-muted);
   font-family: var(--font-sans);
+  font-size: 0.8rem;
+}
+
+/* Subtle, secondary to the file link -- same idiom as .lang but monospace since it's a SHA.
+   Reused as-is in the file-view-header (combined with .badge there for the pill shape). */
+.commit-badge {
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
   font-size: 0.8rem;
 }
 

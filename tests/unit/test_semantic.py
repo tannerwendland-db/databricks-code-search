@@ -54,6 +54,19 @@ def test_flag_off_returns_disabled_payload_and_never_imports_sdk() -> None:
     assert "databricks.sdk" not in sys.modules
 
 
+@pytest.mark.unit
+def test_commit_atom_is_plain_text_not_a_filter() -> None:
+    # AC11: semantic_search does NOT support commit: in v1. A query containing `commit:<hash>` is
+    # treated as ordinary natural-language text -- never parsed as a filter, never resolved, no
+    # error. The engine is never touched (flag off short-circuits), proving no resolution runs.
+    payload = semantic._semantic_search_payload(
+        _PoisonedEngine(), _cfg(enabled=False), "commit:abc1234 auth handler", 10
+    )
+    assert payload["semantic_enabled"] is False
+    assert payload["query"] == "commit:abc1234 auth handler"  # carried verbatim, not rewritten
+    assert payload["results"] == []
+
+
 # --------------------------------------------------------------------- vector literal (M2)
 
 

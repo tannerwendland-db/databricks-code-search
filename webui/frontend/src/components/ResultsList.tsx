@@ -60,6 +60,7 @@ export function ResultsList({ files }: { files: SearchFile[] }): JSX.Element {
               {file.repo}/{file.file}
             </a>
             {file.language && <span className="lang">{file.language}</span>}
+            {file.commit && <span className="commit-badge">{file.commit.slice(0, 12)}</span>}
           </div>
           {file.matches.map((match, i) => (
             <MatchLine

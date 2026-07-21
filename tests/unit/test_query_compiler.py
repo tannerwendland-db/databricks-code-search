@@ -170,6 +170,57 @@ def test_branch_filter_nested_in_or_still_suppresses_default_conjunct() -> None:
     assert "EXISTS (SELECT repos.id" not in sql
 
 
+# ------------------------------------------------------------------ commit (git-hash search)
+
+
+@pytest.mark.unit
+def test_commit_filter_lowers_to_repo_branches_exists() -> None:
+    sql, params = _render("commit:abc1234")
+    # An EXISTS against repo_branches joined on repo_id (NOT a repo-name regex over-match),
+    # scoped to files carrying that branch, with a lowered prefix LIKE.
+    assert "EXISTS (SELECT repo_branches.id" in sql
+    assert "repo_branches.repo_id = files.repo_id" in sql
+    assert "files.branches @> ARRAY[repo_branches.branch]" in sql
+    assert "lower(repo_branches.last_indexed_commit) LIKE" in sql
+    # The prefix binds as an auto-named param (excluded by _param_values), so assert on raw values.
+    assert "abc1234" in set(params.values())
+
+
+@pytest.mark.unit
+def test_commit_filter_reads_repo_branches_never_files_commit() -> None:
+    # The one truth-source is repo_branches.last_indexed_commit; files.commit is never read.
+    sql, _ = _render("commit:abc1234")
+    assert "files.commit" not in sql
+
+
+@pytest.mark.unit
+def test_commit_filter_suppresses_implicit_default_branch_conjunct() -> None:
+    # CRITICAL (consensus iter 2): a commit scope opts out of the implicit default-branch
+    # conjunct -- the repo_branches EXISTS is present while the repos default EXISTS is ABSENT,
+    # else a commit resolving to a non-default branch silently intersects to zero rows.
+    sql, _ = _render("commit:abc1234")
+    assert "EXISTS (SELECT repo_branches.id" in sql
+    assert "EXISTS (SELECT repos.id" not in sql
+
+
+@pytest.mark.unit
+def test_commit_filter_nested_in_and_still_suppresses_default_conjunct() -> None:
+    sql, _ = _render("foo commit:abc1234")
+    assert "EXISTS (SELECT repo_branches.id" in sql
+    assert "EXISTS (SELECT repos.id" not in sql
+
+
+@pytest.mark.unit
+def test_two_commit_atoms_use_distinct_bind_params() -> None:
+    # `commit:a OR commit:b` must NOT collide on one :prefix param (consensus iter 3): each
+    # CommitFilter lowers to its OWN EXISTS with its OWN auto-named bind.
+    sql, params = _render("commit:aaaaaaa OR commit:bbbbbbb")
+    assert sql.count("EXISTS (SELECT repo_branches.id") == 2
+    values = set(params.values())
+    assert "aaaaaaa" in values
+    assert "bbbbbbb" in values
+
+
 # --------------------------------------------------------------------- boolean shapes
 
 

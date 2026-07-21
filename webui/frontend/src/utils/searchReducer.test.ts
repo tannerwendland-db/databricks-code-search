@@ -16,6 +16,8 @@ function envelope(overrides: Partial<SearchEnvelope> = {}): SearchEnvelope {
     no_content_atom: false,
     zero_width_only_atoms: false,
     next_cursor: null,
+    resolved: undefined,
+    commit_not_indexed: undefined,
     ...overrides,
   };
 }
@@ -98,6 +100,37 @@ describe("searchReducer", () => {
     });
     expect(state.banners.truncated).toBe(false);
     expect(state.banners.truncationReason).toBeNull();
+  });
+
+  it("defaults resolved/commitNotIndexed to empty/false when the envelope omits them", () => {
+    const loading = searchReducer(initialSearchState, { type: "search_start", query: "foo" });
+    const next = searchReducer(loading, { type: "search_success", payload: envelope() });
+    expect(next.banners.resolved).toEqual([]);
+    expect(next.banners.commitNotIndexed).toBe(false);
+  });
+
+  it("carries a commit: query's resolved payload into banners and clears it on a page without one", () => {
+    let state = searchReducer(initialSearchState, { type: "search_start", query: "commit:abc1234" });
+    state = searchReducer(state, {
+      type: "search_success",
+      payload: envelope({
+        resolved: [{ repo: "acme", branch: "release-2.1", commit: "abc1234def5678901234567890123456789012", index_time: "2026-01-01T00:00:00Z" }],
+        next_cursor: null,
+      }),
+    });
+    expect(state.banners.resolved).toHaveLength(1);
+    expect(state.banners.resolved[0].repo).toBe("acme");
+    expect(state.banners.commitNotIndexed).toBe(false);
+  });
+
+  it("surfaces commit_not_indexed when a commit: query resolves to nothing", () => {
+    let state = searchReducer(initialSearchState, { type: "search_start", query: "commit:deadbeef" });
+    state = searchReducer(state, {
+      type: "search_success",
+      payload: envelope({ resolved: [], commit_not_indexed: true, next_cursor: null }),
+    });
+    expect(state.banners.commitNotIndexed).toBe(true);
+    expect(state.banners.resolved).toEqual([]);
   });
 
   it("search_error surfaces the error and clears any stale cursor", () => {

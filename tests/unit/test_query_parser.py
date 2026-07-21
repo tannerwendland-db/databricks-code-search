@@ -10,6 +10,7 @@ import pytest
 from app.query.parser import (
     And,
     BranchFilter,
+    CommitFilter,
     LangFilter,
     Or,
     PathFilter,
@@ -47,6 +48,38 @@ def test_sym_filter() -> None:
 @pytest.mark.unit
 def test_branch_filter() -> None:
     assert parse("branch:main") == BranchFilter("main")
+
+
+@pytest.mark.unit
+def test_commit_filter_prefix() -> None:
+    assert parse("commit:abc1234") == CommitFilter("abc1234")
+
+
+@pytest.mark.unit
+def test_commit_filter_full_sha() -> None:
+    sha = "0123456789abcdef0123456789abcdef01234567"  # 40 hex chars
+    assert parse(f"commit:{sha}") == CommitFilter(sha)
+
+
+@pytest.mark.unit
+def test_commit_filter_case_normalized_to_lowercase() -> None:
+    # git object names are lowercase hex; a mixed/upper input is normalized, not rejected.
+    assert parse("commit:ABC1234") == CommitFilter("abc1234")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value",
+    [
+        "xyz1234",  # non-hex letters
+        "abc12",  # too short (< 7)
+        "0123456789abcdef0123456789abcdef012345678",  # too long (41 > 40)
+        "abc123g",  # a single non-hex char anywhere
+    ],
+)
+def test_commit_filter_rejects_invalid_hash(value: str) -> None:
+    with pytest.raises(QueryParseError):
+        parse(f"commit:{value}")
 
 
 @pytest.mark.unit

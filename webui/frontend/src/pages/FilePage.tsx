@@ -122,6 +122,7 @@ export function FilePage({
           {repo}/{path}
         </h2>
         <span className="badge">{state.file.branch}</span>
+        {state.file.commit && <span className="badge commit-badge">{state.file.commit.slice(0, 12)}</span>}
         <button type="button" className="theme-toggle" onClick={copyPermalink}>
           {copied ? "Copied!" : "Copy permalink"}
         </button>
