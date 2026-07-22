@@ -35,8 +35,9 @@ web UI. Everything deploys as one Databricks Asset Bundle.
 - Use `uv` for everything Python (`make install` = `uv sync --all-groups --all-extras`); never pip directly.
 - This project is **Lakebase-only** — there is no local/CI Postgres image. Integration
   tests need an ephemeral Lakebase branch (`scripts/ci_branch.py up`).
-- `config.yaml` is a published template: keep it pointing at placeholder values, never a
-  real account. An empty selector set must keep failing fast (`connection selects nothing`).
+- `config.yaml` ships as a template with nothing selected; people who clone the project
+  fill in their own repos, so never write tests that assert on its contents. A config with
+  no selectors must keep failing fast at parse time (`connection selects nothing`).
 - The committed PNGs under `docs/diagrams/` are generated — edit the `.dot` sources and
   run `make diagrams`.
 - `webui/frontend/dist/` is a committed production build; rebuild with `make webui-build`
