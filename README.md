@@ -209,8 +209,7 @@ Negation is lexical-search only (`search_code` and the web UI's Search page); a 
 is rejected in semantic search (`semantic_search` and the web UI's Semantic page) — remove it
 or quote the term to search it as text.
 
-Not supported in V1. Most of these raise; the first one is silent, which is the more
-dangerous case:
+Unsupported syntax. Most of these raise; the first is silent and therefore more dangerous:
 
 - **`AND` as a keyword.** `a and b` silently searches for the literal word `and`.
 - **`content:`**, and the single-letter aliases `r` `f` `l` `b` `c` `s` — reserved, and
