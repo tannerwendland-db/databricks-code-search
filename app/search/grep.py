@@ -1,10 +1,10 @@
-"""Grep search: precise per-line match extraction over compiler candidates (issue #10).
+"""Grep search: precise per-line match extraction over compiler candidates.
 
-The impure phase-3 orchestration layer. It composes the pure seams --
+The impure orchestration layer. It composes the pure seams --
 :func:`app.query.parser.parse` / :func:`app.query.parser.resolve_case` /
 :func:`app.query.compiler.compile_query` -- and never re-derives predicate or case logic:
-the compiler stays the single source of truth for *which files match*; grep owns *which
-lines match within them*.
+the compiler stays the single source of truth for which files match; grep owns which
+lines match within them.
 
 Design (two-step, streamed):
 
@@ -37,9 +37,9 @@ Caveats (load-bearing, documented, never silently wrong):
   the SQL predicate matched case-insensitively may yield zero Python highlights and drop
   out. ASCII is unaffected.
 * **Highlight-driven results.** A file appears only if at least one line produces a
-  non-empty highlight span, so two query shapes the SQL predicate *does* match still return
-  no files. Both are now **announced by name** rather than returning a silent empty result
-  indistinguishable from a true negative (issue #31):
+  non-empty highlight span, so two query shapes the SQL predicate does match still return
+  no files. Both are announced by name rather than returning a silent empty result
+  indistinguishable from a true negative:
 
   1. A filter-only query with no content atom (e.g. ``lang:go`` alone -- there is nothing to
      highlight; file listing is a separate concern) sets ``no_content_atom``.
@@ -49,20 +49,18 @@ Caveats (load-bearing, documented, never silently wrong):
 
   Both flags are guarded by ``regex_incompatible`` (see :func:`_no_content_atom` /
   :func:`_zero_width_only_atoms`): an atom that never compiled is a content atom whose
-  highlighting capability is *unknown*, and ``regex_incompatible`` is already its signal.
-  Neither flag covers the **case-folding divergence** described in the NOT-RE2 bullet above:
+  highlighting capability is unknown, and ``regex_incompatible`` is already its signal.
+  Neither flag covers the case-folding divergence described in the NOT-RE2 bullet above:
   a file the SQL predicate matched case-insensitively that yields zero Python highlights
-  drops out with patterns present, non-empty, and of non-zero width -- so it is
-  **still entirely unsignalled**. Fixing that needs a new provable signal (follow-up), not
-  one of these two.
-* **Uncapped Python CPU (V1 limitation).** The byte cap bounds memory and aggregate bytes
-  scanned but NOT CPU/wall-clock: a catastrophic-backtracking ``re`` pattern on a single
-  *under-cap* file runs unbounded, holds the GIL, and can starve the app.
-  ``statement_timeout`` does not cover Python work. No guard ships in V1; the real fix is an
-  RE2 binding (follow-up).
-* **Per-file memory** relies on the indexer's per-file byte cap (issue #7 ``MAX_FILE_BYTES``)
-  keeping any single ``content`` bounded; ``File.size`` is nullable/unpopulated in this
-  branch, so a ``size`` pre-filter is intentionally NOT used.
+  drops out with patterns present, non-empty, and of non-zero width -- so it is still
+  entirely unsignalled. Fixing that needs a new provable signal, not one of these two.
+* **Uncapped Python CPU.** The byte cap bounds memory and aggregate bytes scanned but NOT
+  CPU/wall-clock: a catastrophic-backtracking ``re`` pattern on a single under-cap file runs
+  unbounded, holds the GIL, and can starve the app. ``statement_timeout`` does not cover
+  Python work. No guard for this ships yet; the real fix is an RE2 binding.
+* **Per-file memory** relies on the indexer's per-file byte cap (``MAX_FILE_BYTES``) keeping
+  any single ``content`` bounded; ``File.size`` is nullable/unpopulated here, so a ``size``
+  pre-filter is intentionally NOT used.
 
 Byte offsets are UTF-8, line-local, half-open ``[start, end)``: for a :class:`LineMatch`,
 ``line_text.encode("utf-8")[start:end]`` is exactly the matched bytes (file-absolute offsets
@@ -108,11 +106,11 @@ DEFAULT_STATEMENT_TIMEOUT_MS = 5000
 
 
 class _Unset:
-    """Sentinel type for ``grep_search``'s ``cursor`` param (issue #35 A2).
+    """Sentinel type for ``grep_search``'s ``cursor`` param.
 
-    Distinguishes "no ``cursor`` argument at all" (a legacy/bare call -- byte-identical to
-    pre-pagination behavior) from "``cursor`` explicitly supplied" (pagination mode, active
-    even when the value is ``None`` for page 1). ``app/service.py`` mirrors this sentinel for
+    Distinguishes "no ``cursor`` argument at all" (a call that omits it, selecting the
+    non-pagination path) from "``cursor`` explicitly supplied" (pagination mode, active even
+    when the value is ``None`` for page 1). ``app/service.py`` mirrors this sentinel for
     ``search_code_payload``'s own ``cursor`` param and threads a decoded :class:`FileCursor`
     down to this one.
     """
@@ -165,25 +163,24 @@ class GrepResult:
     """A grep result. ``truncated`` (with ``truncation_reason``) flags a partial result;
     a total failure raises :class:`QueryTooBroadError` instead of returning.
 
-    ``no_content_atom`` and ``zero_width_only_atoms`` are raw structural facts about **this
-    leg only** (issue #31). grep reports; it does not know whether a second leg answered the
-    query -- a ``sym:foo`` query is genuinely filter-only *here* and is answered by
-    :func:`app.search.symbols.symbol_search` *there*, so ``no_content_atom`` is ``True`` for
-    it and the envelope (``app/main.py``) is what ANDs in "the symbol leg did not answer".
+    ``no_content_atom`` and ``zero_width_only_atoms`` are raw structural facts about this leg
+    only. grep reports; it does not know whether a second leg answered the query -- a
+    ``sym:foo`` query is genuinely filter-only here and is answered by
+    :func:`app.search.symbols.symbol_search` there, so ``no_content_atom`` is ``True`` for it
+    and the envelope (``app/main.py``) is what ANDs in "the symbol leg did not answer".
     Special-casing ``SymbolFilter`` here would make grep lie to a direct caller that runs no
     symbol leg.
 
     Invariants:
 
-    * **Mutually exclusive by construction.** ``no_content_atom`` requires ``not patterns``;
-      ``zero_width_only_atoms`` requires ``bool(patterns)``. Neither, or one, or the other --
-      never both. This also holds at the envelope layer, which only ever clears flags.
-    * **``zero_width_only_atoms=True`` implies ``files`` is empty -- AT THIS LAYER.** Every
-      span is dropped by the ``m.end() > m.start()`` check in :func:`extract_line_matches`,
-      so no :class:`FileMatches` is ever built. The scope matters: at the envelope layer the
-      same field can sit beside a non-empty ``files`` (``sym:Handler /^/`` folds symbol
-      matches in), and it holds there only *because* the envelope suppresses the flag in
-      exactly that case.
+    * Mutually exclusive by construction: ``no_content_atom`` requires ``not patterns`` and
+      ``zero_width_only_atoms`` requires ``bool(patterns)``, so it is never both. This also
+      holds at the envelope layer, which only ever clears flags.
+    * ``zero_width_only_atoms=True`` implies ``files`` is empty at this layer: every span is
+      dropped by the ``m.end() > m.start()`` check in :func:`extract_line_matches`, so no
+      :class:`FileMatches` is ever built. The scope matters -- at the envelope layer the same
+      field can sit beside a non-empty ``files`` (``sym:Handler /^/`` folds symbol matches in),
+      and it holds there only because the envelope suppresses the flag in exactly that case.
     """
 
     files: tuple[FileMatches, ...]  # in (repo_id, path, content_sha) order
@@ -194,14 +191,14 @@ class GrepResult:
     zero_width_only_atoms: bool  # content atoms present, every one provably zero-width
     next_cursor: FileCursor | None  # last candidate consumed; None when this page exhausts them
 
-    # Pagination-mode note (issue #35 A2): when ``grep_search`` is called WITHOUT a ``cursor``
-    # kwarg (the legacy/bare form every pre-#35 caller uses), a row-capped result still sets
-    # ``truncated=True``/``truncation_reason="row_cap"`` exactly as before -- ``next_cursor`` is
-    # computed regardless but is meaningless to a caller that never asked for it. When ``cursor``
-    # IS supplied (even ``None``, i.e. page 1), a plain row-cap fill sets ``truncated=False`` +
-    # a non-null ``next_cursor`` instead (there is a next page, not an error); a byte-cap trip
-    # still sets ``truncated=True`` in BOTH modes (content was genuinely dropped mid-page) and
-    # may coexist with a non-null ``next_cursor`` resuming after the last row actually consumed.
+    # Pagination-mode note: when ``grep_search`` is called without a ``cursor`` kwarg, a
+    # row-capped result sets ``truncated=True``/``truncation_reason="row_cap"`` -- ``next_cursor``
+    # is computed regardless but is meaningless to a caller that never asked for it. When
+    # ``cursor`` is supplied (even ``None``, i.e. page 1), a plain row-cap fill sets
+    # ``truncated=False`` + a non-null ``next_cursor`` instead (there is a next page, not an
+    # error); a byte-cap trip still sets ``truncated=True`` in both modes (content was genuinely
+    # dropped mid-page) and may coexist with a non-null ``next_cursor`` resuming after the last
+    # row actually consumed.
 
 
 # ----------------------------------------------------------------------- pure helpers
@@ -256,7 +253,7 @@ def _build_matchers(node: Node, case_sensitive: bool) -> tuple[list[re.Pattern[s
 
 
 def _no_content_atom(patterns: Sequence[re.Pattern[str]], regex_incompatible: bool) -> bool:
-    """True when the query carries no content atom at all -- a filter-only query (issue #31).
+    """True when the query carries no content atom at all -- a filter-only query.
 
     ``regex_incompatible`` is a REQUIRED conjunct, not a refinement: ``_collect_matchers``
     swallows ``re.error`` and appends nothing, so an uncompilable regex such as ``/[/`` also
@@ -272,35 +269,35 @@ def _zero_width_only_atoms(patterns: Sequence[re.Pattern[str]], regex_incompatib
     """True when every content atom provably matches zero-width, so nothing can highlight.
 
     ``re._parser.parse(src).getwidth()`` returns ``(min_width, max_width)``; a ``max_width``
-    of 0 **proves** the atom can never produce a non-empty span, so the ``m.end() > m.start()``
+    of 0 proves the atom can never produce a non-empty span, so the ``m.end() > m.start()``
     check in :func:`extract_line_matches` always drops it. ``^``, ``$``, ``\\b`` and lookarounds
     all report ``(0, 0)``.
 
-    Sound (given the guards) but **incomplete**: ``a*`` reports a huge ``max_width`` and is
-    correctly not flagged -- it genuinely *can* highlight, so a flag would be wrong.
+    Sound (given the guards) but incomplete: ``a*`` reports a huge ``max_width`` and is
+    correctly not flagged -- it genuinely can highlight, so a flag would be wrong.
     (``re.compile('a*').finditer('bar')`` yields the non-empty span ``(1, 2)``; see
-    ``test_zero_width_regex_matches_are_dropped``.) The residual gap is corpus-dependent and NOT
+    ``test_zero_width_regex_matches_are_dropped``.) The residual gap is corpus-dependent and not
     statically decidable: ``a*`` over a corpus containing no ``a`` returns zero files unflagged.
     The error direction is false-negatives -- silence -- only, which is what makes the
     private-API dependency below acceptable.
 
-    ``regex_incompatible`` is a REQUIRED conjunct, mirroring :func:`_no_content_atom`. For
+    ``regex_incompatible`` is a required conjunct, mirroring :func:`_no_content_atom`. For
     ``/^/ /[/`` the ``[`` atom never compiled, so it is absent from ``patterns`` and its
-    highlighting capability is **unknown, not proven zero-width**. Without the conjunct this
-    would claim a proof it does not have.
+    highlighting capability is unknown, not proven zero-width. Without the conjunct this would
+    claim a proof it does not have.
 
-    Empty terms are **reachable and correctly flagged**: ``parse('""')`` yields
+    Empty terms are reachable and correctly flagged: ``parse('""')`` yields
     ``Substring(value='')`` and ``parse('//')`` yields ``Regex(pattern='')``, both compiling to
     a width-``(0, 0)`` pattern whose ``finditer`` yields only zero-width hits -- all dropped.
     ``True`` is the right answer for them; no guard is needed.
 
-    **Private-API access site is load-bearing.** ``re._parser`` is a private CPython module and
-    is reached HERE, inside the guarded body, never as a module-scope import beside ``import
+    The private-API access site is load-bearing. ``re._parser`` is a private CPython module and
+    is reached here, inside the guarded body, never as a module-scope import beside ``import
     re``. A module-scope import that fails on a future CPython would take down this module,
     hence ``app/main.py``, hence the whole MCP server -- corruption instead of containment.
-    Reached this way, the ``except Exception`` degrades the flag to ``False``, i.e. exactly the
-    pre-issue-#31 behaviour, and ``test_getwidth_private_api_canary`` fails loudly in CI at
-    upgrade so the degradation is never silent.
+    Reached this way, the ``except Exception`` degrades the flag to ``False``, and
+    ``test_getwidth_private_api_canary`` fails loudly in CI at upgrade so the degradation is
+    never silent.
     """
     if not patterns or regex_incompatible:
         return False
@@ -399,14 +396,14 @@ def grep_search(
     the NOT-RE2 and uncapped-Python-CPU caveats. Raises ``QueryParseError`` on a malformed
     query (propagated from :func:`parse`).
 
-    ``cursor`` (issue #35 A2) activates pagination mode when supplied at all, INCLUDING
-    ``None`` (page 1): a plain row-cap fill then reports ``truncated=False`` plus a non-null
+    ``cursor`` activates pagination mode when supplied at all, including ``None`` (page 1): a
+    plain row-cap fill then reports ``truncated=False`` plus a non-null
     ``GrepResult.next_cursor`` instead of ``truncated=True`` -- there is a next page, not an
-    error. Omitting the kwarg entirely (every pre-#35 caller) is byte-identical to before: a
-    row-capped result still sets ``truncated=True``/``"row_cap"``. A non-``None`` cursor also
-    adds ``WHERE (files.repo_id, files.path) > (:r, :p)`` (row-value comparison) onto the
-    compiler's own ``ORDER BY (repo_id, path)``, so page 1 (``cursor=None``) issues the exact
-    query this function always has.
+    error. Omitting the kwarg entirely selects the non-pagination path: a row-capped result
+    still sets ``truncated=True``/``"row_cap"``. A non-``None`` cursor also adds
+    ``WHERE (files.repo_id, files.path) > (:r, :p)`` (row-value comparison) onto the compiler's
+    own ``ORDER BY (repo_id, path)``, so page 1 (``cursor=None``) issues the exact query this
+    function issues with no cursor.
     """
     pagination_mode = not isinstance(cursor, _Unset)
     resume: FileCursor | None = None if isinstance(cursor, _Unset) else cursor

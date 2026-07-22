@@ -1,4 +1,4 @@
-"""Ephemeral Lakebase branch lifecycle for CI (issue #14 follow-up).
+"""Ephemeral Lakebase branch lifecycle for CI.
 
 CI runs the integration suite against a REAL Lakebase branch rather than a local
 ``pgvector`` container, because the beta surface this repo depends on --

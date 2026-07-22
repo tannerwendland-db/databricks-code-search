@@ -1,4 +1,4 @@
-"""Symbol search: ``sym:`` definition lookup over the compiler's file set (issue #13).
+"""Symbol search: ``sym:`` definition lookup over the compiler's file set.
 
 The serve-side companion to :mod:`app.search.grep` for ``sym:`` queries. The compiler lowers
 ``sym:Name`` to a correlated ``EXISTS(SELECT symbols.id ... WHERE symbols.name ~* 'Name')``

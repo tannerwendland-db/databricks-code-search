@@ -1,19 +1,18 @@
-"""Query/index-time embedding seam (issue #14 Phase 1).
+"""Query/index-time embedding seam.
 
 ``EmbedFn`` is the pure contract the rest of the codebase depends on: texts in,
 unit-normalized dim-D vectors out. :func:`databricks_embedder` is the real
 implementation, backed by the workspace AI Gateway MLflow embeddings route
 (``POST /ai-gateway/mlflow/v1/embeddings`` with ``{"model": ..., "input": ...}``,
 OpenAI-shaped response) via ``databricks-sdk``'s raw API client -- workspace
-auth included, no serving-endpoint name involved. The SDK import is LAZY (inside
-the function body, not module scope) so the flag-off path and unit tests never import it -- mirrors
-the ``from databricks.sdk import WorkspaceClient`` seam already used in
-``app/db/client.py`` and ``indexer/job.py``. ``client`` is an injected SDK
-client (or a fake in tests); when omitted, a real ``WorkspaceClient()`` is
-constructed and the import happens.
+auth included, no serving-endpoint name involved. The SDK import is lazy (inside
+the function body, not module scope) so the flag-off path and unit tests never
+import it, mirroring the ``WorkspaceClient`` seam in ``app/db/client.py`` and
+``indexer/job.py``. ``client`` is an injected SDK client (or a fake in tests);
+when omitted, a real ``WorkspaceClient()`` is constructed and the import happens.
 
-Embeddings are computed OUTSIDE the index transaction (issue #14 A4): nothing
-here opens a DB connection or is called while a lock is held.
+Embeddings are computed outside the index transaction: nothing here opens a DB
+connection or is called while a lock is held.
 """
 
 from __future__ import annotations
@@ -34,11 +33,11 @@ class EmbeddingDimMismatchError(RuntimeError):
 class EmbeddingCountMismatchError(RuntimeError):
     """Raised when an embedder returns a different NUMBER of vectors than texts sent.
 
-    Load-bearing: callers (``indexer.job._precompute_chunk_writer``) re-slice the flat
-    result positionally, so a short batch would silently shift every subsequent file's
-    vectors -- writing chunks whose embedding belongs to a DIFFERENT file. That corruption
-    is invisible (no error, plausible-looking results) and persists until the next
-    re-index, so a count mismatch must fail loudly at the source rather than propagate.
+    Callers (``indexer.job._precompute_chunk_writer``) re-slice the flat result
+    positionally, so a short batch would silently shift every subsequent file's vectors --
+    writing chunks whose embedding belongs to a different file. That corruption is invisible
+    (no error, plausible-looking results) and persists until the next re-index, so a count
+    mismatch must fail loudly at the source rather than propagate.
     """
 
 

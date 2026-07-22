@@ -113,7 +113,7 @@ def resolve_repos(
     """Resolve ``config`` into a deduped, ordered list of :class:`RepoEntry`.
 
     Enumeration exceptions propagate untouched -- nothing has been indexed yet,
-    and Principle 3 says fail loudly before touching anything.
+    so fail loudly before touching anything.
 
     Raises:
         EmptyConfigError: the config resolved to zero repos.

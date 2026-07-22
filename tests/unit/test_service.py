@@ -1,4 +1,4 @@
-"""Unit tests for the keyset-cursor pagination layer in ``app/service.py`` (issue #35 A2/A3).
+"""Unit tests for the keyset-cursor pagination layer in ``app/service.py``.
 
 No DB: cursor encode/decode is pure, and the pagination-mode gating inside
 ``search_code_payload`` is driven with the same fake engine/connection + fake ``GrepResult``
@@ -195,7 +195,7 @@ def test_decode_cursor_rejects_bool_repo_id() -> None:
 
 @pytest.mark.unit
 def test_bare_call_omits_next_cursor_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No `cursor` kwarg at all -- the legacy shape, byte-identical to pre-#35.
+    # No `cursor` kwarg at all -- the legacy shape, byte-identical to before pagination was added.
     monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep())
     monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
 
@@ -359,7 +359,7 @@ def test_query_too_broad_on_grep_omits_next_cursor_when_bare(
     assert "next_cursor" not in payload
 
 
-# ------------------------------------------------- permalink_branch selection (issue #46)
+# ------------------------------------------------- permalink_branch selection
 
 
 @pytest.mark.unit

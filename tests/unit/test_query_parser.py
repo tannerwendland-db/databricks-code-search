@@ -1,4 +1,4 @@
-"""Unit tests for the zoekt query parser (issue #8)."""
+"""Unit tests for the zoekt query parser."""
 
 from __future__ import annotations
 

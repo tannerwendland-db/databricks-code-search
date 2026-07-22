@@ -1,6 +1,6 @@
 """Canonical content hash for content-deduped multi-branch storage.
 
-The single source of truth for ``files.content_sha``. The ``0003`` migration's
+The single source of truth for ``files.content_sha``. The schema migration's
 backfill (``encode(digest(coalesce(content,''),'sha256'),'hex')``) and
 ``indexer/store.py``'s per-file upsert must produce byte-identical output to
 this function forever, or dedup across branches silently breaks (a repeat

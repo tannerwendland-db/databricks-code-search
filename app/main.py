@@ -1,4 +1,4 @@
-"""FastMCP streamable-HTTP server exposing the code-search corpus (issue #11).
+"""FastMCP streamable-HTTP server exposing the code-search corpus.
 
 Adopts the author's shipped FastMCP idiom (``github.com/IceRhymers/uc-catalog-mcp``):
 a stateful ``lifespan`` yielding a context dict reached via
@@ -105,17 +105,17 @@ def _signals(payload: dict[str, Any]) -> dict[str, Any]:
         "truncated": payload.get("truncated"),
         "query_too_broad": payload.get("query_too_broad"),
         "query_parse_error": payload.get("query_parse_error"),
-        # Query-shape signals (issue #31): a filter-only or all-zero-width query returns zero
-        # files legitimately, so without these a shape problem is indistinguishable in the logs
+        # Query-shape signals: a filter-only or all-zero-width query returns zero files
+        # legitimately, so without these a shape problem is indistinguishable in the logs
         # from a genuine no-match.
         "no_content_atom": payload.get("no_content_atom"),
         "zero_width_only_atoms": payload.get("zero_width_only_atoms"),
         # Without this, a flag-on-before-migrate misconfiguration is invisible in logs: every
         # semantic query returns empty and reads identically to a genuine zero-result query.
         "semantic_schema_missing": payload.get("semantic_schema_missing"),
-        # Semantic filter-grammar signals (filter-semantics): a rejected atom or an
-        # all-filters/empty query both return zero results legitimately, so without these a
-        # grammar problem is indistinguishable in the logs from a genuine no-match.
+        # Semantic filter-grammar signals: a rejected atom or an all-filters/empty query both
+        # return zero results legitimately, so without these a grammar problem is
+        # indistinguishable in the logs from a genuine no-match.
         "unsupported_filter": payload.get("unsupported_filter"),
         "nothing_to_embed": payload.get("nothing_to_embed"),
     }
@@ -150,8 +150,8 @@ async def _dispatch(name: str, build: Callable[[], dict[str, Any]]) -> str:
 # ------------------------------------------------------------------------ payload builders
 #
 # The payload builders (clamp_limit / search_code_payload / list_repos_payload /
-# get_file_payload) live in app/service.py (issue #35) so a second Databricks App (webui/) can
-# call them in-process without importing this module's ASGI-app-building side effects. These
+# get_file_payload) live in app/service.py so a second Databricks App (webui/) can call them
+# in-process without importing this module's ASGI-app-building side effects. These
 # aliases keep this module's own call sites and existing tests unchanged; they are the exact
 # same function objects, so tests monkeypatching their collaborators must patch `service.*`
 # (function globals resolve in the DEFINING module, not here).
@@ -162,8 +162,8 @@ _get_file_payload = service.get_file_payload
 
 
 def _append_branch_atom(query: str, branch: str) -> str:
-    """Append ``branch:"<branch>"`` to ``query`` (0003): the ``search_code`` ``branch`` param
-    is sugar for the ``branch:`` query atom, quoted so ``/``, ``.``, and rare spaces are
+    """Append ``branch:"<branch>"`` to ``query``: the ``search_code`` ``branch`` param is
+    sugar for the ``branch:`` query atom, quoted so ``/``, ``.``, and rare spaces are
     scanner-safe. ``app.query.parser._read_quoted`` only special-cases ``\\"`` -> ``"``, so
     the sole character that needs escaping here is an embedded ``"``.
     """
@@ -300,9 +300,9 @@ async def list_repos(ctx: Context) -> str:
 async def get_file(repo: str, path: str, ctx: Context, branch: str | None = None) -> str:
     """Return the full content of a file by repository name and path (miss -> ``found:false``).
 
-    ``branch`` scopes the lookup to the content version indexed on that branch (0003: one path
-    may have several); omitted, it resolves to the repo's default branch. The RESOLVED branch
-    is echoed back in the payload.
+    ``branch`` scopes the lookup to the content version indexed on that branch (one path may
+    have several); omitted, it resolves to the repo's default branch. The resolved branch is
+    echoed back in the payload.
     """
     lc = ctx.request_context.lifespan_context
     return await _dispatch(

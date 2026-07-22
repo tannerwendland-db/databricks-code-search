@@ -1,4 +1,4 @@
-# Databricks App runtime config for the web UI (issue #35). Mirrors app/app.yaml's shape and
+# Databricks App runtime config for the web UI. Mirrors app/app.yaml's shape and
 # rationale: command/env live only here (no inline `config` on the bundle resource, matching
 # resources/webui.yml's comment on why -- avoids a merge conflict / empty-interpolation risk).
 #

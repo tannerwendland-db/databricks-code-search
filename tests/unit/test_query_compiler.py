@@ -1,4 +1,4 @@
-"""Unit tests for the query compiler (issue #9): AST -> SQLAlchemy select.
+"""Unit tests for the query compiler: AST -> SQLAlchemy select.
 
 Pure, no DB. Each compiled statement is rendered via ``stmt.compile(dialect=postgresql
 .dialect())`` and asserted on operator fragments in the SQL text plus bound parameters

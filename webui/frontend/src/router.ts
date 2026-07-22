@@ -1,5 +1,5 @@
-// Minimal client-side router (no dependency: WS-C says "keep deps lean" and this app only
-// has three pages). The backend mounts SPAStaticFiles(html=True) at "/" so any deep link
+// Minimal client-side router (no dependency: this app only has three pages and deps should
+// stay lean). The backend mounts SPAStaticFiles(html=True) at "/" so any deep link
 // (e.g. /file?repo=x&path=y) falls back to index.html and hydrates here from location.
 
 import { useEffect, useSyncExternalStore } from "react";
@@ -22,7 +22,7 @@ export function parseLocation(): Route {
   const { pathname, search, hash } = window.location;
   const params = new URLSearchParams(search);
   if (pathname === "/file") {
-    // #L12 (single line) or #L12-L24 (inclusive range, issue #44 chunk anchors).
+    // #L12 (single line) or #L12-L24 (inclusive range).
     const line = hash.match(/^#L(\d+)(?:-L(\d+))?$/);
     return {
       page: "file",

@@ -46,7 +46,7 @@ describe("parseLocation", () => {
     expect(route).toMatchObject({ page: "file", branch: null });
   });
 
-  it("parses a #L10-L24 range anchor into line/endLine (issue #44)", async () => {
+  it("parses a #L10-L24 range anchor into line/endLine", async () => {
     const route = await parseLocationFor("/file?repo=acme%2Fwidgets&path=a.py#L10-L24");
     expect(route).toMatchObject({ page: "file", line: 10, endLine: 24 });
   });

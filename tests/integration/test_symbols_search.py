@@ -1,4 +1,4 @@
-"""Integration tests for symbol search (issue #13): query -> executed SQL -> symbol defs.
+"""Integration tests for symbol search: query -> executed SQL -> symbol defs.
 
 Requires a running Postgres with the standard PG* env set. Mirrors the throwaway-schema idiom
 of ``tests/integration/test_grep.py`` / ``test_query_compiler.py`` (unique schema, ``SET

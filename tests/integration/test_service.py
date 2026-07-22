@@ -1,4 +1,4 @@
-"""Integration tests for ``search_code_payload``'s keyset-cursor pagination (issue #35 A2/A3).
+"""Integration tests for ``search_code_payload``'s keyset-cursor pagination.
 
 Requires a running Postgres with the standard PG* env set. Mirrors ``test_mcp_server.py``'s
 PGOPTIONS idiom rather than ``test_grep.py``'s single-connection ``seeded`` fixture:
@@ -338,7 +338,7 @@ def test_stale_cursor_from_a_different_query_still_decodes_and_resumes(seeded: S
     assert isinstance(reused["files"], list)
 
 
-# ------------------------------------------------- permalink_branch selection (issue #46)
+# ------------------------------------------------- permalink_branch selection
 #
 # A dedicated, function-scoped fixture (not the module-scoped `seeded` above): mirrors the
 # divergent-content corpus shape from tests/integration/test_query_compiler.py's

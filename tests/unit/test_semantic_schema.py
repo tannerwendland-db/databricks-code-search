@@ -1,6 +1,6 @@
-"""Isolation + dim tripwires for the semantic (issue #14 Phase 0) chunks schema.
+"""Isolation + dim tripwires for the semantic chunks schema.
 
-These guard the two invariants Phase 0 exists to establish:
+These guard the two invariants the semantic schema split exists to establish:
 
 * ``chunks`` never leaks into ``app.db.models.Base.metadata`` -- the core migration
   graph must never autogenerate against a beta-extension-backed table (see
@@ -38,7 +38,7 @@ def test_embedding_dim_single_sourced() -> None:
 
 @pytest.mark.unit
 def test_semantic_defaults_are_on_and_gateway_backed() -> None:
-    """Default-on contract (AC5): no env needed on any app/job for semantic search."""
+    """Default-on contract: no env needed on any app/job for semantic search."""
     cfg = get_settings()
     assert cfg.semantic_enabled is True
     assert cfg.semantic_embedding_model == "system.ai.gte-large-en"

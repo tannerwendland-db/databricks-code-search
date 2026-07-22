@@ -6,7 +6,7 @@ strict allowlist and quoted via psycopg so hostile input cannot inject SQL.
 
 The application role receives read-only access; the job role receives
 read-write access (SELECT/INSERT/UPDATE/DELETE + sequence usage) but no DDL.
-Mapping a Databricks client-id to a concrete role is deferred to issue #6.
+Mapping a Databricks client-id to a concrete role is out of scope for this module.
 
 ``SELECT`` is first-order for the job role, not incidental: the indexing job's
 pre-fan-out stamp read (``indexer.job._read_stamps``) issues a plain ``SELECT``

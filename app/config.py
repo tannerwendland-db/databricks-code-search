@@ -48,11 +48,11 @@ class Settings(BaseSettings):
     row_limit: int = 200
     max_row_limit: int = 1000
 
-    # Gates the semantic_search code path (issue #14). Default True: semantic search is
-    # on by default -- the target Lakebase project's managed shared_preload_libraries
-    # including lakebase_vector,lakebase_text is a stated project assumption (see
-    # docs/runbooks/semantic-enablement.md). Opt out with CODE_SEARCH_SEMANTIC_ENABLED=0;
-    # flag-off is a true no-op (no DB/engine/chunks/embedding/SDK access).
+    # Gates the semantic_search code path. Default True: the target Lakebase project's
+    # managed shared_preload_libraries including lakebase_vector,lakebase_text is a stated
+    # project assumption (see docs/runbooks/semantic-enablement.md). Opt out with
+    # CODE_SEARCH_SEMANTIC_ENABLED=0; flag-off is a true no-op (no DB/engine/chunks/
+    # embedding/SDK access).
     semantic_enabled: bool = True
 
     # AI Gateway MLflow embeddings route (a workspace-relative API path, NOT a serving
@@ -86,8 +86,8 @@ class Settings(BaseSettings):
     # dim=1024 each chunk costs ~32 KB -- 8000 chunks is ~260 MB of vectors plus ~16 MB of
     # chunk text. A larger ceiling (e.g. 50k -> ~1.6 GB) would OOM the job container before
     # this loud check could ever fire, which would defeat the point of having a ceiling.
-    # A repo that legitimately exceeds this needs the temp-table staging path (follow-up),
-    # not a bigger buffer.
+    # A repo that legitimately exceeds this needs a temp-table staging path, not a bigger
+    # buffer.
     semantic_max_chunks_per_repo: int = 8000
 
     # Chunk size bound (tokens) fed to the embedding model. Distinct from MAX_FILE_BYTES,

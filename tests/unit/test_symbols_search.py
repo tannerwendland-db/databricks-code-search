@@ -1,4 +1,4 @@
-"""Unit tests for symbol search (issue #13): pure walker + rendered projection SQL.
+"""Unit tests for symbol search: pure walker + rendered projection SQL.
 
 No DB. The ``sym:`` atom walker and the step-2 projection builder are pure, so the walker is
 asserted directly and the ``Select`` is rendered via ``stmt.compile(dialect=postgresql

@@ -2,31 +2,32 @@
 
 This module turns a user-facing zoekt search string (e.g.
 ``repo:acme lang:go /Foo.*Bar/ case:yes``) into a small, frozen, hashable AST that
-downstream issue #9 lowers to a Postgres query. It is deliberately dependency-free
-(pure stdlib) so it can be imported and unit-tested without touching the database,
-the Databricks SDK, or tree-sitter -- a property enforced by a subprocess purity test.
+the compiler (:mod:`app.query.compiler`) lowers to a Postgres query. It is deliberately
+dependency-free (pure stdlib) so it can be imported and unit-tested without touching the
+database, the Databricks SDK, or tree-sitter -- a property enforced by a subprocess
+purity test.
 
 Design: a hand-written scanner (:func:`tokenize`) produces a flat token stream in which
 runs of whitespace are the AND separator (consumed here), and a recursive-descent parser
 (:func:`parse`) builds an n-ary boolean tree. The AST nodes are a plain union alias with
-no common base class, so #9 gets `match`/exhaustiveness for free.
+no common base class, so the compiler gets `match`/exhaustiveness for free.
 
-Contract / divergence notes (load-bearing for #9 and future work):
+Contract / divergence notes (load-bearing for the compiler and future work):
 
 * Filter-value interpretation contract: ``repo:``/``file:``/``sym:`` values are treated
-  as regular expressions by #9, and ``lang:`` is normalized by #9 against the
-  ``indexer/languages.py`` ``EXT_TO_LANG`` target vocabulary
+  as regular expressions by the compiler, and ``lang:`` is normalized by the compiler
+  against the ``indexer/languages.py`` ``EXT_TO_LANG`` target vocabulary
   ({python, javascript, typescript, tsx, go, java, rust}). That vocabulary is the
-  documented *target*; it is intentionally NOT enforced here -- filter values are opaque.
+  documented target; it is intentionally NOT enforced here -- filter values are opaque.
 * Regex bodies are stored RAW and are never ``re.compile``-d here: Postgres POSIX ARE is
   not Python ``re``, so compiling would false-reject valid patterns. Only delimiter
-  structure (open ``/`` ... closing unescaped ``/``) is validated; body validity is #9's
-  job against the real Postgres engine. Thus ``/[/`` PARSES to ``Regex("[")``.
-* ``-foo`` is a literal :class:`Substring` in V1. When negation ships later, stored
-  ``-foo`` queries will silently flip to negation -- an accepted, documented V1 risk.
-* The OR operator is accepted case-insensitively (``or``/``OR``/``Or``). Issue #8 writes
-  ``OR`` while live zoekt uses lowercase ``or``; this is a deliberate divergence. The
-  literal word is still reachable via quoting (``"or"`` -> ``Substring("or")``).
+  structure (open ``/`` ... closing unescaped ``/``) is validated; body validity is the
+  compiler's job against the real Postgres engine. Thus ``/[/`` PARSES to ``Regex("[")``.
+* ``-foo`` is currently a literal :class:`Substring`. If negation ships later, stored
+  ``-foo`` queries will silently flip to negation -- an accepted, documented risk.
+* The OR operator is accepted case-insensitively (``or``/``OR``/``Or``). The query-writing
+  layer emits ``OR`` while live zoekt uses lowercase ``or``; this is a deliberate
+  divergence. The literal word is still reachable via quoting (``"or"`` -> ``Substring("or")``).
 * Default matching is case-INSENSITIVE, diverging from zoekt smart-case/auto. The
   ``case_sensitive: bool`` field cannot express ``auto``, so a future smart-case feature
   is a bool -> enum migration.
@@ -74,7 +75,7 @@ class PathFilter:
 
 @dataclass(frozen=True)
 class LangFilter:
-    """``lang:<lang>`` -- restrict to a language (normalized/validated by #9, not here)."""
+    """``lang:<lang>`` -- restrict to a language (the compiler normalizes/validates, not here)."""
 
     lang: str
 
@@ -89,7 +90,7 @@ class SymbolFilter:
 @dataclass(frozen=True)
 class BranchFilter:
     """``branch:<value>`` -- restrict to files whose ``branches`` membership includes
-    ``value`` (exact match, opaque here -- #9 lowers it to a GIN-served ``@>``)."""
+    ``value`` (exact match, opaque here -- the compiler lowers it to a GIN-served ``@>``)."""
 
     value: str
 
@@ -97,9 +98,9 @@ class BranchFilter:
 @dataclass(frozen=True)
 class CommitFilter:
     """``commit:<hash>`` -- restrict to files indexed at a git commit whose SHA starts with
-    ``value`` (hex prefix, 7--40 chars, already lowercased + validated here). #9 lowers it to an
-    ``EXISTS`` against ``repo_branches`` -- resolution reads ``last_indexed_commit`` only, NEVER
-    ``files.commit``."""
+    ``value`` (hex prefix, 7--40 chars, already lowercased + validated here). The compiler lowers
+    it to an ``EXISTS`` against ``repo_branches`` -- resolution reads ``last_indexed_commit`` only,
+    NEVER ``files.commit``."""
 
     value: str
 
@@ -118,7 +119,7 @@ class Or:
     children: tuple[Node, ...]
 
 
-# A plain union alias -- no common base class -- so #9 gets match/exhaustiveness.
+# A plain union alias -- no common base class -- so the compiler gets match/exhaustiveness.
 Node: TypeAlias = (
     Substring
     | Regex
@@ -508,9 +509,9 @@ def _resolve_case(tokens: list[Token]) -> bool:
 def resolve_case(query: str) -> bool:
     """Return the query-global case flag (last ``case:`` wins; default False).
 
-    A thin, stdlib-only wrapper over :func:`tokenize` + :func:`_resolve_case`. Issue #9's
-    compiler holds only the AST (where case is stamped on ``Substring``/``Regex`` leaves);
-    a caller holding the raw query string can pass ``resolve_case(query)`` so a filter-only
+    A thin, stdlib-only wrapper over :func:`tokenize` + :func:`_resolve_case`. The compiler
+    holds only the AST (where case is stamped on ``Substring``/``Regex`` leaves); a caller
+    holding the raw query string can pass ``resolve_case(query)`` so a filter-only
     ``case:yes`` query (e.g. ``case:yes file:x``) resolves case exactly instead of falling
     back to insensitive. Additive: no node change, no :func:`parse` output change.
     """

@@ -3,7 +3,7 @@
 These guard the hand-edited invariants that an accidental re-autogenerate could
 silently undo: the fixed revision ids and ``down_revision`` chain, the ``pg_trgm``
 extension being created before any GIN index in ``0001``, the deliberate absence
-of any Phase-4 vector / tsvector / chunks surface in ``0001``, and ``0002``'s
+of any semantic-schema vector / tsvector / chunks surface in ``0001``, and ``0002``'s
 frozen backfill literal plus its cadence-filtered ``UPDATE``.
 
 The ``sources`` fixture globs every digit-prefixed migration (``[0-9]*_*.py``)

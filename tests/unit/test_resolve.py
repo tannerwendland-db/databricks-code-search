@@ -33,7 +33,7 @@ def _config(*connections: dict[str, Any]) -> RepoConfig:
 
 
 class _Enumerator:
-    """Records every call so AC 26 can assert explicit entries enumerate nothing."""
+    """Records every call so tests can assert explicit entries enumerate nothing."""
 
     def __init__(self, results: dict[str, list[RepoMeta]] | None = None) -> None:
         self.results = results or {}
@@ -55,7 +55,7 @@ def _resolve(config: RepoConfig, *, orgs: _Enumerator, users: _Enumerator, **kw:
     return [e.name for e in _resolve_entries(config, orgs=orgs, users=users, **kw)]
 
 
-# --- AC 22-25: the four exclude rules, applied to enumerated repos ----------
+# --- the four exclude rules, applied to enumerated repos -------------------
 
 
 @pytest.mark.unit
@@ -106,7 +106,7 @@ def test_exclude_size_mb_compares_kb_against_mb_times_1000() -> None:
     assert got == ["acme/small"]
 
 
-# --- AC 26-27: explicit repos bypass exclude and enumerate nothing ---------
+# --- explicit repos bypass exclude and enumerate nothing -------------------
 
 
 @pytest.mark.unit
@@ -142,7 +142,7 @@ def test_explicit_repo_bad_host_raises_value_error() -> None:
         )
 
 
-# --- AC 28: dedup across selectors and connections, first-seen order -------
+# --- dedup across selectors and connections, first-seen order --------------
 
 
 @pytest.mark.unit
@@ -177,7 +177,7 @@ def test_dedup_is_case_insensitive_and_keeps_first_seen_spelling() -> None:
     assert got == ["IceRhymers/MyRepo"]
 
 
-# --- AC 29: the two EmptyConfigError message shapes ------------------------
+# --- the two EmptyConfigError message shapes --------------------------------
 
 
 @pytest.mark.unit
@@ -208,7 +208,7 @@ def test_empty_because_everything_excluded_reports_tallies() -> None:
     assert "check exclude rules" in message
 
 
-# --- AC 30: per-connection tallies, cross-connection retention ------------
+# --- per-connection tallies, cross-connection retention ---------------------
 
 
 @pytest.mark.unit
@@ -233,7 +233,7 @@ def test_repo_dropped_in_one_connection_is_retained_via_another(
     assert "connection 1 (github): enumerated 2, retained 2, explicit 0" in messages
 
 
-# --- AC 31: bounded success logging ---------------------------------------
+# --- bounded success logging -------------------------------------------------
 
 
 @pytest.mark.unit
@@ -271,7 +271,7 @@ def test_success_logging_truncates_names_above_fifty(caplog: pytest.LogCaptureFi
     assert names.endswith("… and 10 more")
 
 
-# --- AC 32: the ceiling, checked after dedup ------------------------------
+# --- the ceiling, checked after dedup -----------------------------------------
 
 
 @pytest.mark.unit

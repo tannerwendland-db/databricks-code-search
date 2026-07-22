@@ -1,14 +1,14 @@
-"""Hybrid semantic + BM25 search over ``chunks`` via reciprocal-rank fusion (issue #14).
+"""Hybrid semantic + BM25 search over ``chunks`` via reciprocal-rank fusion.
 
 The serve-side companion to :mod:`app.search.grep` / :mod:`app.search.symbols` for
-natural-language queries. Where grep answers *which lines match a zoekt pattern*, this
-module answers *which chunks are most relevant to a free-text query*, fusing a vector-ANN
+natural-language queries. Where grep answers which lines match a zoekt pattern, this
+module answers which chunks are most relevant to a free-text query, fusing a vector-ANN
 leg (cosine distance over ``chunks.embedding``) and a BM25 leg (over the generated
 ``chunks.ts`` ``tsvector``) with reciprocal-rank fusion (RRF, ``k=60``).
 
-Two load-bearing shapes, both grounded against the live Lakebase project (plan REV 3):
+Two load-bearing shapes, both grounded against the live Lakebase project:
 
-1. **One shared RRF fusion wrapper, two rank-CTE legs.** The fusion arithmetic (two
+1. One shared RRF fusion wrapper, two rank-CTE legs. The fusion arithmetic (two
    rank CTEs, ``FULL OUTER JOIN``, ``1/(k+rank)`` sum) wraps a per-leg distance/score
    fragment (:data:`_ANN_METRIC` / :data:`_BM_METRIC`). Each leg's ``ORDER BY <metric>
    LIMIT :topk`` runs in an INNER subquery so the ANN / BM25 index is usable (an
@@ -19,15 +19,15 @@ Two load-bearing shapes, both grounded against the live Lakebase project (plan R
    ``ORDER BY metric ASC`` puts the best row first (lakebase BM25 scores are negative;
    more-negative = better).
 
-2. **The query vector is a bound param, never interpolated.** :func:`format_vector_literal`
+2. The query vector is a bound param, never interpolated. :func:`format_vector_literal`
    builds ``"[f0,f1,...]"`` with ``repr`` (``repr(1e-05) == "1e-05"``; ``format(x, "r")`` is
    an invalid format code and raises), and it is bound as ``:qvec`` cast ``(:qvec)::vector``
    -- no ``register_vector`` adapter, no f-string interpolation of floats into SQL.
 
 Result envelope: each result returns ``chunk_index`` + ``content`` (joined ``chunks ->
 files -> repos`` for the ``repo`` name and file ``path``) plus the chunk's 1-based
-inclusive ``start_line``/``end_line`` (issue #44) -- nullable, NULL for rows indexed
-before the line-aware chunk writer.
+inclusive ``start_line``/``end_line`` -- nullable, NULL for rows indexed before the
+line-aware chunk writer.
 
 Flag-off is a true no-op: :func:`_semantic_search_payload` short-circuits on the FIRST line
 when ``cfg.semantic_enabled`` is false, returning the feature-absent payload BEFORE touching
@@ -55,14 +55,14 @@ from app.query.semantic_filters import (
 if TYPE_CHECKING:
     from app.embed import EmbedFn
 
-# RRF and candidate-set defaults (plan REV 3): k=60 dampens the head of each rank list; each
-# leg contributes its top :topk index-accelerated candidates before fusion.
+# RRF and candidate-set defaults: k=60 dampens the head of each rank list; each leg
+# contributes its top :topk index-accelerated candidates before fusion.
 SEMANTIC_RRF_K = 60
 SEMANTIC_TOP_K = 200
 
-# lakebase_ann `<=>` cosine distance, ASC = nearer. Both metrics are qualified `c.`
-# (0003, Option D1): the inner subquery's FROM joins chunks/files/repos for branch
-# scoping, and qualification there is load-bearing -- see _leg_cte.
+# lakebase_ann `<=>` cosine distance, ASC = nearer. Both metrics are qualified `c.`:
+# the inner subquery's FROM joins chunks/files/repos for branch scoping, and
+# qualification there is load-bearing -- see _leg_cte.
 _ANN_METRIC = "c.embedding <=> (:qvec)::vector"
 
 # BM25 score fragment, shaped so ORDER BY metric ASC ranks best-first: lakebase_bm25
@@ -85,16 +85,16 @@ def format_vector_literal(vec: list[float]) -> str:
 
 
 def _branch_predicate(branches: tuple[str, ...]) -> str:
-    """The branch-scoping WHERE fragment shared by both legs' inner subquery (0003, Option D1).
+    """The branch-scoping WHERE fragment shared by both legs' inner subquery.
 
     ``branches == ()`` (default-branch, no atom and no ``branch`` param): a correlated match
     against each chunk's own repo -- ``coalesce(r.default_branch, 'HEAD') = ANY(f.branches)`` --
-    byte-identical to the query compiler's implicit default conjunct and the ``0003``
+    byte-identical to the query compiler's implicit default conjunct and the
     backfill/``get_file`` sites (a NULL ``default_branch`` resolves to ``'HEAD'`` everywhere).
-    One or more explicit branch values (Decision C1, filter-semantics): the GIN-served
-    exact-membership operator, AND-composed once per value -- ``f.branches @> ARRAY[:sem_branch_0]
-    AND f.branches @> ARRAY[:sem_branch_1] ...`` -- conjunctive, the same semantics as lexical
-    ``branch:a branch:b`` (mirrors ``app.query.compiler``'s explicit-``branch:`` path).
+    One or more explicit branch values: the GIN-served exact-membership operator, AND-composed
+    once per value -- ``f.branches @> ARRAY[:sem_branch_0] AND f.branches @> ARRAY[:sem_branch_1]
+    ...`` -- conjunctive, the same semantics as lexical ``branch:a branch:b`` (mirrors
+    ``app.query.compiler``'s explicit-``branch:`` path).
     """
     if not branches:
         return "coalesce(r.default_branch, 'HEAD') = ANY(f.branches)"
@@ -109,7 +109,7 @@ def _leg_cte(name: str, metric: str, branch_pred: str, *, extra_where: str = "")
     ``branch_pred`` (see :func:`_branch_predicate`) is always present -- it lives in the INNER
     subquery's ``WHERE``, never the ``ORDER BY``, so it never costs the index a second sort key.
 
-    Qualification scope is critical (0003): the INNER subquery joins ``chunks c`` to
+    Qualification scope is critical: the INNER subquery joins ``chunks c`` to
     ``files f`` / ``repos r`` for branch scoping, so ``metric``/``extra_where`` must be
     ``c.``-qualified (``c.embedding``, ``c.ts``) and the inner projection is ``SELECT c.id AS
     id``. The OUTER ``row_number()`` window (this CTE's own ``SELECT``) stays BARE -- ``id``,
@@ -117,7 +117,7 @@ def _leg_cte(name: str, metric: str, branch_pred: str, *, extra_where: str = "")
     ``id``/``metric``; ``c`` is out of scope there and referencing it raises "missing
     FROM-clause entry for table c".
 
-    Determinism (issues #9/#13) is enforced ONLY where it does not cost the index:
+    Determinism is enforced only where it does not cost the index:
 
     * ``row_number()`` breaks ties on ``id``. Scores plateau (BM25 especially), and arbitrary
       rank assignment among equals changes each row's ``1/(k+rank)`` contribution, so the same
@@ -153,7 +153,7 @@ def _leg_cte(name: str, metric: str, branch_pred: str, *, extra_where: str = "")
 class _CompiledFilters:
     """The single derivation both :func:`build_hybrid_rrf_sql` and :func:`filter_params` read
     from -- so the predicates the builder emits and the binds the params companion returns can
-    never drift apart (Decision C1's "shared normalizer" guarantee).
+    never drift apart.
 
     ``repo_file_lang_where``: the AND-joined ``repo:``/``file:``/``lang:`` predicate fragment
     (``""`` when none of those filters are present). ``branch_pred``: see
@@ -169,16 +169,16 @@ class _CompiledFilters:
 def _normalized_filter_state(
     filters: SemanticFilters | None, branch: str | None
 ) -> _CompiledFilters:
-    """Normalize ``filters`` + the legacy ``branch`` kwarg into predicates + binds, ONCE.
+    """Normalize ``filters`` + the ``branch`` kwarg into predicates + binds, once.
 
-    Branch unification (Decision C1, iteration 3 MAJOR): the normalized branch list is
+    Branch unification: the normalized branch list is
     ``sorted(set(atom_values) | ({branch} if branch else set()))`` -- a param equal to an
     existing ``branch:`` atom dedupes to one predicate (it is the same set element); a
     param-only call (``filters=None``) still routes through this list, so ``branch="x"`` and a
     bare ``branch:x`` atom emit byte-identical SQL. Any branch value present (atom or param)
     suppresses the implicit default-branch coalesce arm. ``lang:`` values are normalized
-    (``.strip().lower()``) here, matching ``app.query.compiler``'s ``_lower`` byte-for-byte
-    (KD-3); ``repo:``/``file:`` values stay opaque (bound raw, matched as regexes downstream).
+    (``.strip().lower()``) here, matching ``app.query.compiler``'s ``_lower`` byte-for-byte;
+    ``repo:``/``file:`` values stay opaque (bound raw, matched as regexes downstream).
     """
     repo_patterns = filters.repo_patterns if filters is not None else ()
     path_patterns = filters.path_patterns if filters is not None else ()
@@ -234,12 +234,11 @@ def build_hybrid_rrf_sql(
     numbered ``:sem_*`` binds (see :func:`filter_params`, which returns the exact same dict).
     ``filters`` (:class:`app.query.semantic_filters.SemanticFilters`, from
     :func:`app.query.semantic_filters.split_semantic_query`) compiles to WHERE predicates
-    inside BOTH leg CTEs' inner subqueries -- filter-then-rank, never post-filtered. ``branch``
-    is kept for call-site compatibility; its value is folded into the SAME normalized branch
-    list as any ``branch:`` atom (Decision C1) -- there is no separate ``:branch`` bind or
-    predicate arm. Rows come back as ``(id, repo, path, chunk_index, content, start_line,
-    end_line, rrf_score, cosine_distance)`` after joining the fused ids back to
-    ``chunks -> files -> repos``.
+    inside both leg CTEs' inner subqueries -- filter-then-rank, never post-filtered. ``branch``
+    is folded into the same normalized branch list as any ``branch:`` atom -- there is no
+    separate ``:branch`` bind or predicate arm. Rows come back as ``(id, repo, path,
+    chunk_index, content, start_line, end_line, rrf_score, cosine_distance)`` after joining the
+    fused ids back to ``chunks -> files -> repos``.
     """
     compiled = _normalized_filter_state(filters, branch)
     # ANN leg skips NULL embeddings: `embedding <=> :qvec` is NULL for them and Postgres
@@ -262,12 +261,12 @@ def build_hybrid_rrf_sql(
         # chunks at the same rank pair sum identically), so without a tiebreak WHICH
         # tied rows survive this LIMIT is unspecified -- the outer ORDER BY would then
         # be deterministically sorting a nondeterministic set. Matches the explicit
-        # id-tiebreak determinism convention from issues #9/#13.
+        # id-tiebreak determinism convention used elsewhere.
         "ORDER BY rrf DESC, id LIMIT :lim) "
         "SELECT fused.id AS id, r.name AS repo, f.path AS path, "
         "c.chunk_index AS chunk_index, c.content AS content, "
         "c.start_line AS start_line, c.end_line AS end_line, fused.rrf AS rrf_score, "
-        # Recomputed here (Decision B1), not carried from the ANN leg: every fused row gets a
+        # Recomputed here, not carried from the ANN leg: every fused row gets a
         # distance -- including BM25-only rows that never entered the ANN top-:topk (exactly
         # the noise rows callers most need to judge). NULL-embedding rows yield SQL NULL.
         f"{_ANN_METRIC} AS cosine_distance "
@@ -311,7 +310,7 @@ def get_embedder(cfg: Settings) -> EmbedFn:
 
 
 def _semantic_disabled_payload(query: str) -> dict[str, Any]:
-    """The feature-absent payload: a clean no-op result, never a 500/503 (plan P2)."""
+    """The feature-absent payload: a clean no-op result, never a 500/503."""
     return {
         "query": query,
         "semantic_enabled": False,
@@ -342,9 +341,8 @@ def _semantic_not_migrated_payload(query: str) -> dict[str, Any]:
     }
 
 
-# Every rejected atom's remedy: WHAT to do instead, so the breaking change on `commit:` (it used
-# to be plain prose, see the ADR in .omc/plans/ralplan-semantic-filter-similarity.md) and the
-# other rejections are self-documenting at the point of impact, not just a bare error string.
+# Every rejected atom's remedy: what to do instead, so each rejection is self-documenting at
+# the point of impact, not just a bare error string.
 _UNSUPPORTED_FILTER_REMEDIES: dict[str, str] = {
     "commit:": "commit-scoped search is lexical-only; use search_code",
     "sym:": "symbol filters are lexical-only; use search_code",
@@ -406,7 +404,7 @@ def _semantic_search_payload(
     FIRST line short-circuits to :func:`_semantic_disabled_payload` when the feature is
     explicitly disabled (``CODE_SEARCH_SEMANTIC_ENABLED=0``) -- BEFORE the engine or the
     embedder is touched, so the disabled path never opens a connection or imports
-    ``databricks-sdk`` (plan P2/A1) and never even parses ``query``.
+    ``databricks-sdk`` and never even parses ``query``.
 
     When enabled, :func:`app.query.semantic_filters.split_semantic_query` runs next -- a pure,
     DB-free step -- and any of its three recoverable outcomes return BEFORE the schema probe or
@@ -419,18 +417,17 @@ def _semantic_search_payload(
     ``conn.begin()``), then run the RRF query under a transaction-local ``statement_timeout``
     and join the fused ids back to ``chunks -> files -> repos``.
 
-    ``branch`` (0003, Option D1; unified with in-query ``branch:`` atoms by Decision C1,
-    filter-semantics): sugar for a ``branch:`` atom, conjunctive with any already in ``query``.
-    No value anywhere scopes each leg to its chunk's own repo's default branch (the same
-    ``coalesce(...,'HEAD')`` as the query compiler); threaded straight to
-    :func:`build_hybrid_rrf_sql` / :func:`filter_params`.
+    ``branch`` (unified with in-query ``branch:`` atoms): sugar for a ``branch:`` atom,
+    conjunctive with any already in ``query``. No value anywhere scopes each leg to its chunk's
+    own repo's default branch (the same ``coalesce(...,'HEAD')`` as the query compiler);
+    threaded straight to :func:`build_hybrid_rrf_sql` / :func:`filter_params`.
 
     Result envelope: ``{"query", "semantic_enabled": True, "results": [{"repo", "file",
     "chunk_index", "content", "start_line", "end_line", "rrf_score", "similarity"}], "count"}``.
-    ``start_line``/``end_line`` are 1-based inclusive (issue #44) and ``None`` for rows
-    indexed before the line-aware chunk writer (consumers fall back to needle-matching).
-    ``similarity`` is ``1 - cosine_distance`` (the ANN metric, recomputed per result -- Decision
-    B1), ``None`` for rows whose chunk has no embedding.
+    ``start_line``/``end_line`` are 1-based inclusive and ``None`` for rows indexed before the
+    line-aware chunk writer (consumers fall back to needle-matching). ``similarity`` is
+    ``1 - cosine_distance`` (the ANN metric, recomputed per result), ``None`` for rows whose
+    chunk has no embedding.
     """
     if not cfg.semantic_enabled:
         return _semantic_disabled_payload(query)
@@ -484,13 +481,13 @@ def _semantic_search_payload(
             "file": row.path,
             "chunk_index": row.chunk_index,
             "content": row.content,
-            # 1-based inclusive line range (issue #44); None for rows indexed before the
-            # line-aware writer (consumers fall back to needle-matching).
+            # 1-based inclusive line range; None for rows indexed before the line-aware writer
+            # (consumers fall back to needle-matching).
             "start_line": row.start_line,
             "end_line": row.end_line,
             "rrf_score": float(row.rrf_score),
-            # Raw cosine similarity (Decision B1): uninterpretable fused rrf_score alone hides
-            # true-match/noise separation; NULL cosine_distance (no embedding) -> None.
+            # Raw cosine similarity: the fused rrf_score alone hides true-match/noise
+            # separation; NULL cosine_distance (no embedding) -> None.
             "similarity": (1.0 - row.cosine_distance) if row.cosine_distance is not None else None,
         }
         for row in rows

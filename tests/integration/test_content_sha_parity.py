@@ -1,14 +1,14 @@
-"""Phase-0 hard gate: prove Postgres ``pgcrypto`` and Python hashing agree.
+"""Hard gate: prove Postgres ``pgcrypto`` and Python hashing agree.
 
-The ``0003`` migration's in-DB backfill (Option B1) computes
+The ``0003`` migration's in-DB backfill computes
 ``encode(digest(coalesce(content,''),'sha256'),'hex')``; the indexer's every
 subsequent write goes through ``indexer.hashing.content_sha``. If these ever
 disagree, the first post-migration index of an unchanged repo would mint a new
-``content_sha`` for every file and silently duplicate the corpus (plan
-pre-mortem #1). This test is the gate that decides B1 (usable) vs B2 (Python
-two-phase fallback) is safe to ship.
+``content_sha`` for every file and silently duplicate the corpus. This test is
+the gate that decides whether the in-DB backfill is safe to ship, versus
+falling back to a two-phase Python backfill.
 
-Also verifies the *stronger* claim Phase 0 requires: pgcrypto must be usable by
+Also verifies the stronger claim required here: pgcrypto must be usable by
 the migrator, not merely listed in ``pg_available_extensions`` -- either it is
 already installed, or ``CREATE EXTENSION IF NOT EXISTS pgcrypto`` succeeds under
 the same connection ``scripts/migrate.py`` uses.

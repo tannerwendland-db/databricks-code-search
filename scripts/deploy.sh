@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# deploy.sh — the ordering engine for the code-search bundle (issue #12).
+# deploy.sh — the ordering engine for the code-search bundle.
 #
 # Usage: deploy.sh <full|destroy> [TARGET]   (TARGET defaults to dev)
 #
@@ -133,9 +133,9 @@ cmd_full() {
 			"or re-run deploy after setting it"
 	fi
 
-	# 5. Migrate (schema only) — alembic upgrade head as the developer identity. No grants yet
-	#    (Decision A1): neither app's SP pg role exists until its first activation (steps 6, 8).
-	#    The developer thereby owns the tables and needs no later job grant on dev.
+	# 5. Migrate (schema only) — alembic upgrade head as the developer identity. No grants yet:
+	#    neither app's SP pg role exists until its first activation (steps 6, 8). The developer
+	#    thereby owns the tables and needs no later job grant on dev.
 	echo "deploy: [5/11] make migrate (schema only)"
 	make migrate TARGET="$TARGET"
 
@@ -145,7 +145,7 @@ cmd_full() {
 	databricks bundle run code_search -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
 	state=$(wait_active "$app_name")
 	if [ "$state" != ACTIVE ]; then
-		# First-activation fallback (Pre-mortem #1): push source directly, re-run, re-probe.
+		# First-activation fallback: push source directly, re-run, re-probe.
 		echo "deploy: app did not activate via bundle run; falling back to apps deploy" >&2
 		databricks apps deploy "$app_name" --source-code-path "$file_path/app"
 		databricks bundle run code_search -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}
@@ -154,32 +154,31 @@ cmd_full() {
 			die "app '$app_name' never reached ACTIVE (last state: ${state:-unknown})"
 	fi
 
-	# 7. Grants for the MCP app (post-activation, Decision C1 + D1). APP_SP_ROLE is derived
-	#    FRESH from apps get at this moment and guarded by req before it can ever reach
-	#    validate_role.
+	# 7. Grants for the MCP app (post-activation). APP_SP_ROLE is derived FRESH from apps get
+	#    at this moment and guarded by req before it can ever reach validate_role.
 	echo "deploy: [7/11] grants (post-activation)"
 	app_sp_role=$(req "$(databricks apps get "$app_name" -o json |
 		jq -er '.service_principal_client_id')" "app SP client id")
 	# dev grants the app only (job_writer_role="" is falsy → migrate.py's `if job_env:` skips
-	# it, so a stray JOB_WRITER_ROLE in the developer's shell can't leak a job grant, Addendum 3).
+	# it, so a stray JOB_WRITER_ROLE in the developer's shell can't leak a job grant).
 	local job_writer_role=""
 	if [ "$TARGET" = prod ]; then
 		# prod's JOB_WRITER_ROLE comes from the guarded env, NOT bundle-JSON (which resolves
-		# job_run_as_sp to its "" default without --var). D1: assert BOTH before granting so a
-		# missing writer role can't silently leave the indexer SP write-less (Pre-mortem #5).
+		# job_run_as_sp to its "" default without --var). Assert BOTH before granting so a
+		# missing writer role can't silently leave the indexer SP write-less.
 		job_writer_role="$JOB_RUN_AS_SP"
 		{ [ -n "$app_sp_role" ] && [ -n "$job_writer_role" ]; } ||
 			die "prod grants require BOTH APP_SP_ROLE and JOB_WRITER_ROLE"
 	fi
-	# NOTE (Addendum 2): `make migrate TARGET=prod` re-runs `bundle validate -t prod` WITHOUT
+	# NOTE: `make migrate TARGET=prod` re-runs `bundle validate -t prod` WITHOUT
 	# --var job_run_as_sp; harmless — it derives only endpoint/db (independent of job_run_as_sp)
 	# and the "" default validates green (databricks.yml:43).
 	# Retry to absorb the lag between the app reaching ACTIVE and its SP role becoming visible in
-	# pg_roles (Pre-mortem #2); grants + `upgrade head` are idempotent, so re-tries are safe.
+	# pg_roles; grants + `upgrade head` are idempotent, so re-tries are safe.
 	retry 5 10 grant_attempt "$app_sp_role" "$job_writer_role" "$TARGET" ||
 		die "grants failed after retries (is the app SP role visible in pg_roles yet?)"
 
-	# 8. Run webui (#35) — same shape as step 6, second app, second SP, same first-activation
+	# 8. Run webui — same shape as step 6, second app, second SP, same first-activation
 	#    fallback.
 	echo "deploy: [8/11] bundle run webui (ship source + start compute)"
 	databricks bundle run webui -t "$TARGET" ${VAR_ARGS[@]+"${VAR_ARGS[@]}"}

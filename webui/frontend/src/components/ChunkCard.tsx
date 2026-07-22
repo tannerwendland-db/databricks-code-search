@@ -3,8 +3,8 @@ import { extractNeedle } from "../utils/chunkAnchor";
 
 export function chunkHref(result: SemanticResult): string {
   const params = new URLSearchParams({ repo: result.repo, path: result.file });
-  // Exact anchor when the chunk carries its line range (issue #44); rows indexed before
-  // line tracking have nulls and keep the needle-match fallback below.
+  // Exact anchor when the chunk carries its line range; rows indexed before line
+  // tracking have nulls and keep the needle-match fallback below.
   if (result.start_line !== null && result.end_line !== null) {
     const range =
       result.end_line > result.start_line

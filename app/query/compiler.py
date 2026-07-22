@@ -1,9 +1,9 @@
-"""Parser AST -> SQLAlchemy Core ``select`` over ``files`` (issue #9).
+"""Parser AST -> SQLAlchemy Core ``select`` over ``files``.
 
 Lowers the immutable AST produced by :mod:`app.query.parser` into a single, pure
 :class:`sqlalchemy.Select`. The compiler needs no DB connection, so unit tests render
-SQL via ``stmt.compile(dialect=postgresql.dialect())``. Each of the 9 node types lowers
-to a ``ColumnElement[bool]`` so ``And``/``Or`` compose with ``and_()``/``or_()``.
+SQL via ``stmt.compile(dialect=postgresql.dialect())``. Each node type lowers to a
+``ColumnElement[bool]`` so ``And``/``Or`` compose with ``and_()``/``or_()``.
 
 Trigram acceleration is the point: content/path/symbol-name predicates lower to
 operators the GIN ``gin_trgm_ops`` indexes can serve (``ILIKE``/``LIKE``/``~*``/``~``),
@@ -11,38 +11,37 @@ never wrapping the indexed column in a function.
 
 Contract / divergence notes (load-bearing):
 
-* **Case propagation (KD-1).** The frozen parser stamps ``case_sensitive`` only on
-  ``Substring``/``Regex`` -- filters carry no case flag. Because case is a query-GLOBAL
+* Case propagation. The frozen parser stamps ``case_sensitive`` only on
+  ``Substring``/``Regex`` -- filters carry no case flag. Because case is a query-global
   flag (parser ``_resolve_case``, last-wins), every content/regex leaf in a tree shares
   it, so we derive it from any such leaf and thread it to ``file:``/``sym:`` lowering.
   ``case_sensitive=None`` (default) derives-from-leaf (exact for any query with a
   content/regex term; insensitive fallback for a filter-only query). A caller holding
   the raw query may pass ``resolve_case(query)`` to make the filter-only ``case:yes``
-  case exact. ``repo:`` is ALWAYS case-insensitive (``~*``) -- it is not in the issue's
-  case-flip list.
-* **Regex is opaque (KD-2 / P5).** Regex/filter patterns bind RAW as parameters -- never
-  escaped, never ``re.compile``-d. An invalid POSIX ARE surfaces as a DB execution error
-  at query time, not at compile time.
-* **``lang:`` normalization (KD-3).** ``File.lang == lang.strip().lower()``; unknown
-  values match nothing (empty result) rather than raising. No ``indexer`` import.
-* **Substring escaping (KD-4 / P5).** ``LIKE``/``ILIKE`` literals escape ``\\``, ``%``,
-  ``_`` (backslash first) with ``escape="\\"``.
-* **Ordering / projection.** Results project ``(id, repo_id, path, lang)`` -- NOT the
-  up-to-MB nullable ``content`` (phase-3 fetches content per confirmed match). Ordered by
+  case exact. ``repo:`` is ALWAYS case-insensitive (``~*``) -- it is not in the
+  case-flip set.
+* Regex is opaque. Regex/filter patterns bind RAW as parameters -- never escaped, never
+  ``re.compile``-d. An invalid POSIX ARE surfaces as a DB execution error at query time,
+  not at compile time.
+* ``lang:`` normalization. ``File.lang == lang.strip().lower()``; unknown values match
+  nothing (empty result) rather than raising. No ``indexer`` import.
+* Substring escaping. ``LIKE``/``ILIKE`` literals escape ``\\``, ``%``, ``_`` (backslash
+  first) with ``escape="\\"``.
+* Ordering / projection. Results project ``(id, repo_id, path, lang)`` -- NOT the
+  up-to-MB nullable ``content`` (content is fetched per confirmed match). Ordered by
   ``(repo_id, path, content_sha)``, unique per ``UniqueConstraint(repo_id, path,
-  content_sha)`` (0003, multi-branch dedup) -> a deterministic, stable ``LIMIT`` page with
-  no ``id`` tiebreak. Predicate emission order does NOT drive execution -- Postgres reorders
-  ANDed predicates by its own statistics.
-* **Branch scoping (0003).** ``branch:<value>`` (:class:`BranchFilter`) lowers to the
+  content_sha)`` -> a deterministic, stable ``LIMIT`` page with no ``id`` tiebreak.
+  Predicate emission order does NOT drive execution -- Postgres reorders ANDed predicates
+  by its own statistics.
+* Branch scoping. ``branch:<value>`` (:class:`BranchFilter`) lowers to the
   GIN-served exact-membership operator ``files.branches @> ARRAY[:v]``. When the AST carries
   NO ``BranchFilter`` anywhere, :func:`compile_query` ANDs in an IMPLICIT default-branch
   conjunct: a correlated ``EXISTS`` against ``repos`` testing
   ``coalesce(repos.default_branch, 'HEAD') = ANY(files.branches)``. That ``coalesce`` is
-  byte-identical to the one used by the ``0003`` migration backfill and by the semantic
-  default leg / ``get_file`` -- a NULL ``default_branch`` must resolve to ``'HEAD'``
-  everywhere. Unlike the explicit ``@>`` path, this default conjunct is a per-row correlated
-  filter and is **NOT GIN-served**: it runs behind whatever trgm/content scan the rest of the
-  predicate reaches.
+  byte-identical to the one used by the migration backfill and by the semantic default leg /
+  ``get_file`` -- a NULL ``default_branch`` must resolve to ``'HEAD'`` everywhere. Unlike the
+  explicit ``@>`` path, this default conjunct is a per-row correlated filter and is NOT
+  GIN-served: it runs behind whatever trgm/content scan the rest of the predicate reaches.
 """
 
 from __future__ import annotations
@@ -102,7 +101,7 @@ def _default_branch_conjunct() -> ColumnElement[bool]:
     A correlated ``EXISTS`` against ``repos`` (not a constant) so each file is checked
     against ITS OWN repo's default branch: ``coalesce(repos.default_branch, 'HEAD') =
     ANY(files.branches)``. The ``coalesce(..., 'HEAD')`` must stay byte-identical to the
-    ``0003`` backfill and the semantic/``get_file`` default sites. NOT GIN-served.
+    migration backfill and the semantic/``get_file`` default sites. NOT GIN-served.
     """
     return exists(
         select(Repo.id).where(
@@ -126,7 +125,7 @@ def compile_query(
     the raw query string may pass ``resolve_case(query)`` to make the filter-only
     ``case:yes`` case exact. Raises ``ValueError`` when ``limit`` is negative.
 
-    Branch scoping (0003): an explicit ``branch:`` atom anywhere in ``node`` lowers to
+    Branch scoping: an explicit ``branch:`` atom anywhere in ``node`` lowers to
     ``files.branches @> ARRAY[:v]`` (GIN-served); when absent, the implicit correlated
     default-branch conjunct (see :func:`_default_branch_conjunct`) is ANDed in instead.
     """
@@ -201,8 +200,8 @@ def _lower(node: Node, cs: bool) -> ColumnElement[bool]:
                 )
             )
         case BranchFilter(value=v):
-            # GIN-served exact membership (Option C1) -- explicit branch: opts out of the
-            # implicit default-branch conjunct (see compile_query / _has_branch_filter).
+            # GIN-served exact membership -- explicit branch: opts out of the implicit
+            # default-branch conjunct (see compile_query / _has_branch_filter).
             return File.branches.op("@>")(literal([v], type_=ARRAY(Text)))
         case CommitFilter(value=prefix):
             # Resolve the hex prefix through repo_branches (the ONLY commit truth-source; never

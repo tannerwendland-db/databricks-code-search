@@ -177,14 +177,14 @@ def list_user_repos(client: httpx.Client, user: str) -> list[RepoMeta]:
 def list_branches(client: httpx.Client, org: str, repo: str) -> list[str]:
     """Every branch name for ``org/repo``, paginated the same way as list-repos.
 
-    Used only when a connection configures ``branches:`` globs (plan Phase 2):
-    resolving glob patterns needs the repo's real branch list to match against.
+    Used only when a connection configures ``branches:`` globs: resolving glob
+    patterns needs the repo's real branch list to match against.
 
     Complete-or-raise, via :func:`_paginated_get`: any page's failure (a rate
     limit, an HTTP error, anything else) raises out of this call rather than
     returning whatever pages were fetched so far -- there is no partial-list
-    return path. That is load-bearing for corpus reconciliation (#56): a caller
-    that resolved a truncated branch list without knowing it was truncated could
+    return path. That is load-bearing for corpus reconciliation: a caller that
+    resolved a truncated branch list without knowing it was truncated could
     treat missing branches as evidence they no longer exist upstream and retire
     them. A mid-pagination failure here instead fails the whole repo (see
     ``indexer.job._index_one_inner``), never a silently short branch list.

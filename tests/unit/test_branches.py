@@ -25,7 +25,7 @@ def test_empty_globs_ignores_all_branches_entirely() -> None:
 
 @pytest.mark.unit
 def test_empty_globs_is_always_complete() -> None:
-    """AC1/AC3: the default-branch-only fast path can never be truncated."""
+    """The default-branch-only fast path can never be truncated."""
     got = resolve_branches("main", ["main", "dev"], [], repo="acme/widgets")
     assert got.complete is True
     assert got.dropped == ()
@@ -120,7 +120,7 @@ def test_cap_truncates_and_warns(caplog: pytest.LogCaptureFixture) -> None:
 
 @pytest.mark.unit
 def test_cap_overflow_dropped_names_exact(caplog: pytest.LogCaptureFixture) -> None:
-    """AC2: the exact set of dropped branches is reported, not just a count."""
+    """The exact set of dropped branches is reported, not just a count."""
     all_branches = ["main"] + [f"b{i:02d}" for i in range(30)]
     with caplog.at_level(logging.WARNING, logger="indexer.branches"):
         got = resolve_branches("main", all_branches, ["*"], repo="acme/widgets", cap=5)
@@ -139,7 +139,7 @@ def test_cap_overflow_dropped_names_exact(caplog: pytest.LogCaptureFixture) -> N
 def test_warning_text_states_discovery_incomplete_and_reconciliation_blocked(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """D2: the truncation warning must name the reconciliation consequence, not just the count."""
+    """The truncation warning must name the reconciliation consequence, not just the count."""
     all_branches = ["main"] + [f"b{i:02d}" for i in range(30)]
     with caplog.at_level(logging.WARNING, logger="indexer.branches"):
         resolve_branches("main", all_branches, ["*"], repo="acme/widgets", cap=5)
@@ -186,9 +186,9 @@ def test_default_cap_is_the_module_constant() -> None:
 
 @pytest.mark.unit
 def test_default_branch_flip_is_complete_and_drops_the_old_default() -> None:
-    """AC3: a default-branch flip (main -> master retired) is valid retirement
+    """A default-branch flip (main -> master retired) is valid retirement
     evidence ONLY because discovery is complete -- distinct from the cap-overflow
-    case, where an omitted branch must NOT be treated as retired (AC2).
+    case, where an omitted branch must NOT be treated as retired.
     """
     got = resolve_branches("main", ["main", "master"], ["main"], repo="acme/widgets")
     assert got.branches == ["main"]

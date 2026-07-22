@@ -1,4 +1,4 @@
-# uv-based dependency manifest for the web UI Databricks App (issue #35).
+# uv-based dependency manifest for the web UI Databricks App.
 #
 # WHY uv instead of requirements.txt: the Databricks Apps runtime defaults to Python 3.11 on the
 # pip path, but this repo's `databricks-code-search` wheel declares `requires-python = ">=3.12"`

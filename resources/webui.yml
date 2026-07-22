@@ -1,4 +1,4 @@
-# Databricks App (#35): the web UI, a second Databricks App alongside the MCP server.
+# Databricks App: the web UI, a second Databricks App alongside the MCP server.
 #
 # Minimal declaration by design, mirroring resources/app.yml. The app runs as its own
 # auto-provisioned service principal; it binds ${DATABRICKS_APP_PORT:-8000} (shell form so

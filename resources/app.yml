@@ -1,4 +1,4 @@
-# Databricks App (#11): the FastMCP streamable-HTTP code-search server.
+# Databricks App: the FastMCP streamable-HTTP code-search server.
 #
 # Minimal declaration by design. The app runs as its auto-provisioned service principal; it
 # binds ${DATABRICKS_APP_PORT:-8000} (shell form so the injected port is honored) and reads

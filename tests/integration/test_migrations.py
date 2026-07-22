@@ -319,13 +319,13 @@ def test_semantic_chunks_created_at_head(migrated: Migrated) -> None:
         .scalars()
         .all()
     )
-    # Line-range columns present from birth (issue #44).
+    # Line-range columns present from birth.
     assert {"start_line", "end_line"} <= set(cols)
 
 
 @pytest.mark.integration
 def test_0004_guard_preserves_preexisting_chunks() -> None:
-    """AC6/idempotency: a schema that already has chunks (old gated migrate-semantic)
+    """Idempotency: a schema that already has chunks (old gated migrate-semantic)
     upgrades to head without re-running the DDL -- data survives, the line-range
     columns are added, and the orphaned alembic_version_semantic table is dropped."""
     schema = _unique("test_0004_guard")
@@ -345,7 +345,7 @@ def test_0004_guard_preserves_preexisting_chunks() -> None:
         conn.commit()
 
         # Simulate the retired gated migration's leftovers: a chunks table with data
-        # (pre-#44 shape, no line columns) and its separate version table.
+        # (pre-line-tracking shape, no line columns) and its separate version table.
         conn.execute(text("INSERT INTO repos (name) VALUES ('r1')"))
         repo_id = conn.execute(text("SELECT id FROM repos WHERE name = 'r1'")).scalar()
         conn.execute(
@@ -465,7 +465,7 @@ def test_migrate_run_apply_grants_end_to_end(monkeypatch: pytest.MonkeyPatch) ->
 def test_migrate_run_apply_grants_app_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """With only APP_SP_ROLE set, the app read-only grant lands and no job grant is applied.
 
-    Proves the independent-grant path (Decision C1): the app role can SELECT but its INSERT
+    Proves the independent-grant path: the app role can SELECT but its INSERT
     raises InsufficientPrivilege, confirming it never received the write grants.
     """
     migrate = _load_migrate()

@@ -20,7 +20,7 @@ function result(overrides: Partial<SemanticResult>): SemanticResult {
 }
 
 describe("chunkHref", () => {
-  it("links to an exact #L<start>-L<end> range when the chunk carries lines (issue #44)", () => {
+  it("links to an exact #L<start>-L<end> range when the chunk carries lines", () => {
     const href = chunkHref(result({ start_line: 10, end_line: 24 }));
     expect(href).toBe("/file?repo=acme%2Fwidgets&path=src%2Fauth.py#L10-L24");
   });
@@ -30,7 +30,7 @@ describe("chunkHref", () => {
     expect(href).toBe("/file?repo=acme%2Fwidgets&path=src%2Fauth.py#L7");
   });
 
-  it("falls back to the needle-match find= param when lines are null (pre-#44 rows)", () => {
+  it("falls back to the needle-match find= param when lines are null (rows indexed before line tracking)", () => {
     const href = chunkHref(result({}));
     expect(href).toContain("find=");
     expect(href).toContain(encodeURIComponent("a much longer needle line").replace(/%20/g, "+"));

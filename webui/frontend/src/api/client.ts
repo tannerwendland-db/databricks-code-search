@@ -1,4 +1,4 @@
-// Thin fetch wrappers around the webui FastAPI backend (webui/main.py, WS-B). Kept separate
+// Thin fetch wrappers around the webui FastAPI backend (webui/main.py). Kept separate
 // from the reducer/types module (../utils/searchReducer) so the wire types have exactly one
 // home; this file only knows how to reach the routes.
 
@@ -40,7 +40,7 @@ export interface SemanticResult {
   file: string;
   chunk_index: number;
   content: string;
-  // 1-based inclusive line range (issue #44); null for chunks indexed before line tracking.
+  // 1-based inclusive line range; null for chunks indexed before line tracking.
   start_line: number | null;
   end_line: number | null;
   rrf_score: number;

@@ -1,6 +1,6 @@
 """Unit tests for indexer.store's reconcile helpers' pre-transaction guards.
 
-Mirrors the #14 Phase 2 unit/integration split: these tests prove the sanitizer
+Mirrors the store's unit/integration split: these tests prove the sanitizer
 and no-op paths never open a transaction or touch the connection at all -- the
 real DML (repo lock, membership strip, cascade delete, registry cleanup) is
 covered against a live Postgres in tests/integration/test_reconcile.py.

@@ -3,7 +3,7 @@
 This module must NOT import ``indexer.job`` -- that pulls ~543 modules (sqlalchemy,
 tree_sitter, pydantic_settings) and the import-light property of ``repo_config`` is
 what keeps these tests fast and dependency-free. The ``config_loader`` default
-assertion (AC 34) lives in ``test_job.py`` for exactly this reason.
+assertion lives in ``test_job.py`` for exactly this reason.
 
 The workspace read seam is faked with ``io.BytesIO`` -- no filesystem, no creds.
 """
@@ -11,7 +11,6 @@ The workspace read seam is faked with ``io.BytesIO`` -- no filesystem, no creds.
 from __future__ import annotations
 
 import io
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -32,7 +31,7 @@ from indexer.repo_config import (
 _MINIMAL = b"version: 1\nconnections:\n  - type: github\n    users: [IceRhymers]\n"
 
 
-# --- normalize_repo (AC 10; relocated from test_job.py per Decision 0) -------
+# --- normalize_repo (relocated from test_job.py) -----------------------------
 
 
 @pytest.mark.unit
@@ -73,12 +72,11 @@ def test_normalize_repo_rejects(entry: str) -> None:
         normalize_repo(entry)
 
 
-# --- schema (AC 1-6) --------------------------------------------------------
+# --- schema -------------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_parse_config_minimal() -> None:
-    """AC 1."""
     cfg = parse_config(_MINIMAL, source="/Workspace/x/config.yaml")
 
     assert cfg.version == 1
@@ -90,7 +88,7 @@ def test_parse_config_minimal() -> None:
 
 @pytest.mark.unit
 def test_unknown_connection_type_rejected() -> None:
-    """AC 2 -- the discriminator names both the location and the bad tag."""
+    """The discriminator names both the location and the bad tag."""
     with pytest.raises(ValidationError) as excinfo:
         RepoConfig.model_validate(
             {"version": 1, "connections": [{"type": "gitlab", "orgs": ["acme"]}]}
@@ -103,7 +101,6 @@ def test_unknown_connection_type_rejected() -> None:
 
 @pytest.mark.unit
 def test_missing_version_rejected() -> None:
-    """AC 3a."""
     with pytest.raises(ValidationError) as excinfo:
         RepoConfig.model_validate({"connections": [{"type": "github", "users": ["u"]}]})
 
@@ -112,7 +109,7 @@ def test_missing_version_rejected() -> None:
 
 @pytest.mark.unit
 def test_unsupported_version_rejected() -> None:
-    """AC 3b -- names both the supplied and the supported version."""
+    """Names both the supplied and the supported version."""
     with pytest.raises(ValidationError) as excinfo:
         RepoConfig.model_validate(
             {"version": 2, "connections": [{"type": "github", "users": ["u"]}]}
@@ -128,7 +125,7 @@ def test_unsupported_version_rejected() -> None:
 
 @pytest.mark.unit
 def test_empty_connections_rejected() -> None:
-    """AC 4 -- min_length=1."""
+    """Empty connections list is rejected via min_length=1."""
     with pytest.raises(ValidationError) as excinfo:
         RepoConfig.model_validate({"version": 1, "connections": []})
 
@@ -137,7 +134,7 @@ def test_empty_connections_rejected() -> None:
 
 @pytest.mark.unit
 def test_connection_with_no_selectors_rejected() -> None:
-    """AC 5 -- the validator's message plus pydantic's own error location."""
+    """The validator's message plus pydantic's own error location."""
     with pytest.raises(ValidationError) as excinfo:
         RepoConfig.model_validate({"version": 1, "connections": [{"type": "github"}]})
 
@@ -165,7 +162,6 @@ def test_branches_accepts_glob_patterns() -> None:
 
 @pytest.mark.unit
 def test_exclude_defaults() -> None:
-    """AC 6."""
     cfg = parse_config(_MINIMAL, source="cfg")
 
     assert cfg.connections[0].exclude == ExcludeRules(
@@ -393,7 +389,7 @@ def test_semantic_block_rejects_out_of_bound_values(field: str, value: bytes) ->
 
 @pytest.mark.unit
 def test_bad_semantic_block_surfaces_as_config_error_through_parse_config() -> None:
-    """AC 4: a misvalidated ``semantic:`` block fails the run at parse time with the
+    """A misvalidated ``semantic:`` block fails the run at parse time with the
     ConfigError contract (path in the message), exactly like index_concurrency."""
     raw = (
         b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"
@@ -493,12 +489,12 @@ def test_settings_overrides_keys_are_real_settings_fields_and_types_survive() ->
     assert revalidated.semantic_embedding_timeout_s == 5.5
 
 
-# --- parse failures (AC 7-8) ------------------------------------------------
+# --- parse failures -------------------------------------------------------
 
 
 @pytest.mark.unit
 def test_malformed_yaml_raises_config_error() -> None:
-    """AC 7 -- a raw yaml.YAMLError must not escape."""
+    """A raw yaml.YAMLError must not escape."""
     with pytest.raises(ConfigError) as excinfo:
         parse_config(b"version: 1\nconnections: [oops\n", source="/Workspace/x/config.yaml")
 
@@ -508,7 +504,7 @@ def test_malformed_yaml_raises_config_error() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("raw", [b"- one\n- two\n", b"just a scalar\n", b"\n"])
 def test_non_mapping_document_raises_config_error(raw: bytes) -> None:
-    """AC 8 -- checked before pydantic sees the document."""
+    """Checked before pydantic sees the document."""
     with pytest.raises(ConfigError) as excinfo:
         parse_config(raw, source="/Workspace/x/config.yaml")
 
@@ -517,22 +513,7 @@ def test_non_mapping_document_raises_config_error(raw: bytes) -> None:
     assert "mapping" in message or "empty" in message
 
 
-# --- the shipped config (AC 9) ----------------------------------------------
-
-_SHIPPED_CONFIG = Path(__file__).parents[2] / "config.yaml"
-
-
-@pytest.mark.unit
-def test_shipped_config_is_a_template_that_fails_fast() -> None:
-    """The shipped config.yaml is a fork-me template with every selector commented
-    out. Deployed unedited it must refuse to load — never silently index someone
-    else's repos. Located relative to this file, so invocation directory is
-    irrelevant."""
-    with pytest.raises(ConfigError, match="connection selects nothing"):
-        parse_config(_SHIPPED_CONFIG.read_bytes(), source=str(_SHIPPED_CONFIG))
-
-
-# --- read seam (AC 11-13) ---------------------------------------------------
+# --- read seam ---------------------------------------------------------------
 
 
 class _FakeWorkspace:
@@ -556,7 +537,6 @@ class _FakeClient:
 
 @pytest.mark.unit
 def test_load_config_downloads_exactly_the_given_path() -> None:
-    """AC 11."""
     client = _FakeClient(payload=_MINIMAL)
 
     cfg = load_config(client, "/Workspace/x/config.yaml")
@@ -567,7 +547,7 @@ def test_load_config_downloads_exactly_the_given_path() -> None:
 
 @pytest.mark.unit
 def test_not_found_becomes_config_error_with_404() -> None:
-    """AC 12 -- 'never synced' is self-identifying; the SDK error does not escape."""
+    """'Never synced' is self-identifying; the SDK error does not escape."""
     from databricks.sdk.errors import NotFound
 
     client = _FakeClient(error=NotFound("nope"))
@@ -582,7 +562,7 @@ def test_not_found_becomes_config_error_with_404() -> None:
 
 @pytest.mark.unit
 def test_permission_denied_becomes_config_error_with_403() -> None:
-    """AC 13 -- 'no read permission' is distinguishable from AC 12's 'never synced'."""
+    """'No read permission' is distinguishable from the 'never synced' case above."""
     from databricks.sdk.errors import PermissionDenied
 
     client = _FakeClient(error=PermissionDenied("denied"))

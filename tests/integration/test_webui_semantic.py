@@ -1,4 +1,4 @@
-"""Integration tests for the webui ``/api/semantic`` route against a Lakebase branch (issue #36).
+"""Integration tests for the webui ``/api/semantic`` route against a Lakebase branch.
 
 Runs the production ``lakebase_ann``/``lakebase_bm25`` operators (the suite's Lakebase
 branch preloads them -- see docs/runbooks/ci-lakebase.md). It proves the webui **route**
@@ -220,7 +220,7 @@ def test_api_semantic_enabled_returns_deterministic_ordered_results(
     assert all(isinstance(s, float) for s in scores)
     assert scores == sorted(scores, reverse=True)
 
-    # Line ranges round-trip to the HTTP envelope (issue #44).
+    # Line ranges round-trip to the HTTP envelope.
     top = body1["results"][0]
     assert (top["start_line"], top["end_line"]) == (1, 1)
 

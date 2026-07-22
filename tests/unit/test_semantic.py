@@ -101,7 +101,7 @@ def test_format_vector_literal_empty() -> None:
     assert semantic.format_vector_literal([]) == "[]"
 
 
-# ------------------------------------------------------------------------ RRF SQL shape (M1)
+# ------------------------------------------------------------------------ RRF SQL fusion shape
 
 
 @pytest.mark.unit
@@ -112,7 +112,7 @@ def test_rrf_sql_fusion_wrapper() -> None:
     assert "ann AS (" in sql and "bm AS (" in sql
     # Both legs break rank ties on id: arbitrary rank assignment among equal scores would
     # change each row's 1/(k+rank) contribution, so the same query over the same corpus
-    # could otherwise fuse to a different order (issues #9/#13 determinism rule).
+    # could otherwise fuse to a different order (the determinism rule).
     assert sql.count("row_number() OVER (ORDER BY metric, id)") == 2
     # NEITHER leg's inner ORDER BY may carry a second sort key. Postgres cannot build an
     # ordered-index path when one follows an ORDER BY-operator key, and the fallback is not
@@ -120,7 +120,7 @@ def test_rrf_sql_fusion_wrapper() -> None:
     # guard is the fast tripwire; the plan itself is only observable on a Lakebase branch.
     assert "ORDER BY c.embedding <=> (:qvec)::vector LIMIT :topk" in sql
     assert ", id LIMIT :topk" not in sql
-    # The ANN metric appears THREE times (filter-semantics, Decision B1): twice inside the ANN
+    # The ANN metric appears THREE times (filter-semantics): twice inside the ANN
     # leg CTE (inner SELECT + inner ORDER BY, index-served ordering) and once more in the OUTER
     # select as the recomputed `cosine_distance` column -- never inside either leg CTE.
     assert sql.count("c.embedding <=> (:qvec)::vector") == 3
@@ -136,7 +136,7 @@ def test_rrf_sql_fusion_wrapper() -> None:
     assert "coalesce(1.0 / (:k + ann.rank), 0) + coalesce(1.0 / (:k + bm.rank), 0)" in sql
     # The `, id` tiebreak is load-bearing: RRF scores tie constantly, so without it WHICH
     # tied rows survive this inner LIMIT is unspecified and the outer ORDER BY would be
-    # deterministically sorting a nondeterministic set (issues #9/#13 determinism rule).
+    # deterministically sorting a nondeterministic set (the determinism rule).
     assert "ORDER BY rrf DESC, id LIMIT :lim" in sql
     # Envelope join back to chunks -> files -> repos.
     assert "JOIN files f ON f.id = c.file_id" in sql
@@ -158,7 +158,7 @@ def test_rrf_sql_bm_leg_uses_bm25_scorer() -> None:
     assert "ts_rank_cd" not in sql
 
 
-# --------------------------------------------------------- branch-scoped leg (0003, D1)
+# --------------------------------------------------------- branch-scoped leg (0003)
 
 
 @pytest.mark.unit
@@ -166,7 +166,7 @@ def test_rrf_sql_explicit_branch_uses_gin_served_membership() -> None:
     sql = str(semantic.build_hybrid_rrf_sql(branch="feature/x"))
     # Explicit branch: opts into the GIN-served exact-membership predicate on BOTH legs,
     # and the default coalesce predicate must not also be present. filter-semantics unifies the
-    # bind mechanism (Decision C1): the `branch` kwarg now routes through the SAME normalized
+    # bind mechanism: the `branch` kwarg now routes through the SAME normalized
     # sem_branch_{i} binds as an in-query `branch:` atom -- the old `:branch` bind is retired.
     assert sql.count("f.branches @> ARRAY[:sem_branch_0]") == 2
     assert ":branch" not in sql
@@ -189,7 +189,7 @@ def test_rrf_sql_branch_predicate_is_where_never_order_by() -> None:
 
 @pytest.mark.unit
 def test_rrf_sql_inner_subquery_is_c_qualified_outer_window_stays_bare() -> None:
-    """Compile-time proof of the qualification-scope contract (0003, D1 -- review-hardened).
+    """Compile-time proof of the qualification-scope contract (0003 -- review-hardened).
 
     The INNER subquery (which joins chunks/files/repos for branch scoping) must qualify its
     id/metric columns `c.`; the OUTER row_number() window selects from the derived table `s`
@@ -250,7 +250,7 @@ def test_filter_params_normalizes_lang_value() -> None:
 
 @pytest.mark.unit
 def test_rrf_sql_branch_atom_and_param_dedupe_to_one_predicate() -> None:
-    # Decision C1: a `branch` kwarg equal to an existing `branch:` atom is a set union, so it
+    # A `branch` kwarg equal to an existing `branch:` atom is a set union, so it
     # collapses to ONE predicate/bind, not two.
     filters = SemanticFilters(
         repo_patterns=(), path_patterns=(), langs=(), branches=("feature",), residual="x"
@@ -263,7 +263,7 @@ def test_rrf_sql_branch_atom_and_param_dedupe_to_one_predicate() -> None:
 
 @pytest.mark.unit
 def test_rrf_sql_branch_atom_and_param_conjunction_when_different() -> None:
-    # Decision C1: distinct atom + param values AND together (conjunctive, lexical-parity),
+    # Distinct atom + param values AND together (conjunctive, lexical-parity),
     # sorted for determinism -- NOT source order.
     filters = SemanticFilters(
         repo_patterns=(), path_patterns=(), langs=(), branches=("zzz",), residual="x"
@@ -276,7 +276,7 @@ def test_rrf_sql_branch_atom_and_param_conjunction_when_different() -> None:
 
 @pytest.mark.unit
 def test_drift_seal_bind_names_match_filter_params_exactly() -> None:
-    """The shared-normalizer guarantee (Decision C1), PROVEN not assumed: the `:sem_*` bind
+    """The shared-normalizer guarantee, PROVEN not assumed: the `:sem_*` bind
     names referenced in the builder's own SQL text are EXACTLY the keys `filter_params` returns,
     for a query mixing repeated repo:/file:/lang: atoms plus both a branch: atom and a branch
     param.
@@ -295,7 +295,7 @@ def test_drift_seal_bind_names_match_filter_params_exactly() -> None:
 
 @pytest.mark.unit
 def test_parity_pin_operator_tokens_match_lexical_compiler() -> None:
-    """Predicate-level parity byte-check (Decision Principle 1): the semantic builder's
+    """Predicate-level parity byte-check: the semantic builder's
     hand-written repo:/lang:/branch: predicates use the SAME comparison operator as the
     compiler-rendered lexical query for the identical atoms -- `~*` for repo:, `=` for lang:,
     `@>` for branch:. (The semantic side spells its branch RHS as an inline `ARRAY[...]`
@@ -452,7 +452,7 @@ def test_enabled_but_not_migrated_returns_structured_payload(
 
 @pytest.mark.unit
 def test_similarity_null_for_null_cosine_distance(monkeypatch: pytest.MonkeyPatch) -> None:
-    # AC6, the converse of test_enabled_payload_shape: a NULL cosine_distance (e.g. a BM25-only
+    # The converse of test_enabled_payload_shape: a NULL cosine_distance (e.g. a BM25-only
     # row, or a chunk indexed with no embedding) surfaces as similarity: None, not a crash/0.0.
     monkeypatch.setattr(semantic, "get_embedder", lambda cfg: lambda texts: [[0.1, 0.2]])
     engine = _FakeEngine(
@@ -487,7 +487,7 @@ def test_similarity_null_for_null_cosine_distance(monkeypatch: pytest.MonkeyPatc
 
 @pytest.mark.unit
 def test_residual_is_embedded_and_bound_to_qtext(monkeypatch: pytest.MonkeyPatch) -> None:
-    # AC3: the residual (query minus filter atoms) is the ONE string used both as the embedder
+    # The residual (query minus filter atoms) is the ONE string used both as the embedder
     # input and the :qtext bind -- captured independently and asserted equal.
     captured_embed_input: list[str] = []
 
@@ -532,7 +532,7 @@ def test_residual_is_embedded_and_bound_to_qtext(monkeypatch: pytest.MonkeyPatch
     ],
 )
 def test_unsupported_atom_yields_structured_payload(query: str, expected_atom: str) -> None:
-    # AC4: one unit test per rejected atom -- structured payload, zero results, no exception
+    # One unit test per rejected atom -- structured payload, zero results, no exception
     # escapes, engine never touched (the poisoned engine proves it).
     payload = semantic._semantic_search_payload(_PoisonedEngine(), _cfg(enabled=True), query, 10)
 
@@ -545,7 +545,7 @@ def test_unsupported_atom_yields_structured_payload(query: str, expected_atom: s
 
 @pytest.mark.unit
 def test_bare_repo_field_yields_query_parse_error_payload() -> None:
-    # AC4/empty-value atoms: bare `repo:` raises QueryParseError at scan time (parser.py
+    # Empty-value atoms: bare `repo:` raises QueryParseError at scan time (parser.py
     # _emit_field), surfaced end to end as the query_parse_error payload field.
     payload = semantic._semantic_search_payload(_PoisonedEngine(), _cfg(enabled=True), "repo:", 10)
 
@@ -557,7 +557,7 @@ def test_bare_repo_field_yields_query_parse_error_payload() -> None:
 
 @pytest.mark.unit
 def test_filter_only_query_never_embeds() -> None:
-    # AC5: a filter-only query (no residual text) never calls the embedder and never runs an
+    # A filter-only query (no residual text) never calls the embedder and never runs an
     # RRF query -- proven with a poisoned engine AND a poisoned get_embedder in the same test.
     payload = semantic._semantic_search_payload(
         _PoisonedEngine(), _cfg(enabled=True), "repo:acme lang:python", 10
@@ -571,7 +571,7 @@ def test_filter_only_query_never_embeds() -> None:
 
 @pytest.mark.unit
 def test_empty_query_nothing_to_embed_wording() -> None:
-    # AC5, the second wording: an empty/whitespace-only query (no atoms at all) is worded
+    # The second wording: an empty/whitespace-only query (no atoms at all) is worded
     # differently from the filters-only case above, so the caller sees WHY it is empty.
     payload = semantic._semantic_search_payload(_PoisonedEngine(), _cfg(enabled=True), "   ", 10)
 

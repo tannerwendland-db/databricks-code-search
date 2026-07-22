@@ -1,17 +1,17 @@
-"""End-to-end tests for the FastMCP server over streamable HTTP (issue #11).
+"""End-to-end tests for the FastMCP server over streamable HTTP.
 
 Requires a running Postgres with the standard PG* env set (CI's service container, or a local
 Postgres for `make test-integration`).
 
-Two seams are load-bearing (both proven in review):
+Two seams are load-bearing:
 
-* **Schema visibility (Critic M1).** The fixture seeds a throwaway schema and sets
+* **Schema visibility.** The fixture seeds a throwaway schema and sets
   ``search_path`` on its *own* admin connection, but the server builds its *own* engine whose
   connections default to ``search_path=public``. So BEFORE the server engine is built we set
   ``os.environ["PGOPTIONS"] = "-c search_path=<schema>,public"`` — libpq applies it to every
   server connection (local psycopg path) — and reset the process-scoped engine singleton
   (``app.main._engine = None``) so the server builds a fresh engine under that PGOPTIONS.
-* **DNS-rebinding (Critic M-B).** ``FastMCP`` defaults ``host=127.0.0.1`` and auto-enables
+* **DNS-rebinding.** ``FastMCP`` defaults ``host=127.0.0.1`` and auto-enables
   DNS-rebinding protection allowing only port-bearing localhost/127.0.0.1. A ``Host`` of
   ``app`` or a portless ``localhost`` 421s before any tool runs, so the client uses the
   port-bearing ``http://localhost:8000`` base URL and ``/mcp`` path.
@@ -88,7 +88,7 @@ def seeded_schema() -> Iterator[str]:
     * ``repo_branches`` rows for both ``acme/widgets`` branches (but deliberately NONE for
       ``beta/tools``, which keeps the legacy "no repo_branches row" fallback path covered).
     * ``gamma/nullbranch`` has ``default_branch IS NULL`` with one file on ``branches=["HEAD"]``
-      -- the NULL-default ``coalesce(...,'HEAD')`` reachability golden case (pre-mortem #3),
+      -- the NULL-default ``coalesce(...,'HEAD')`` reachability golden case,
       exercised identically at the query-compiler/semantic/``get_file`` sites elsewhere.
     """
     schema = _unique(SCHEMA_PREFIX)
@@ -260,7 +260,7 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 assert {"search_code", "semantic_search", "list_repos", "get_file"} <= names
 
                 # semantic_search is registered UNCONDITIONALLY; with the flag off (the default)
-                # it returns the clean feature-absent payload rather than 500/503 (issue #14 P2).
+                # it returns the clean feature-absent payload rather than 500/503.
                 sem = _tool_json(await session.call_tool("semantic_search", {"query": "auth flow"}))
                 assert sem["semantic_enabled"] is False
                 assert sem["results"] == []
@@ -278,13 +278,13 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 for start, end in m["byte_ranges"]:
                     assert m["text"].encode("utf-8")[start:end] == b"foo"
 
-                # The query-shape keys (#31) survive json.dumps in _dispatch and reach the
-                # wire; a content query proves neither condition. [AC4]
+                # The query-shape keys survive json.dumps in _dispatch and reach the
+                # wire; a content query proves neither condition.
                 assert search["no_content_atom"] is False
                 assert search["zero_width_only_atoms"] is False
 
                 # A filter-only query over the real server: zero files, announced by name
-                # rather than returned as a silent empty result. [AC1]
+                # rather than returned as a silent empty result.
                 filter_only = _tool_json(
                     await session.call_tool("search_code", {"query": "lang:go"})
                 )
@@ -351,7 +351,7 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 )
                 assert feature_search_atom["file_count"] == 1
                 assert feature_search_atom["files"][0]["branches"] == ["feature/x"]
-                # permalink_branch (issue #46): a query with an explicit branch: atom resolves
+                # permalink_branch: a query with an explicit branch: atom resolves
                 # the emitted file's permalink to that same branch.
                 assert feature_search_atom["files"][0]["permalink_branch"] == "feature/x"
 
@@ -373,7 +373,7 @@ async def test_streamable_http_tools_and_health(seeded_schema: str) -> None:
                 assert "updated on feature/x" in feature_file["content"]
                 assert "foo" not in feature_file["content"]
 
-                # NULL default_branch reachability (pre-mortem #3): coalesce(...,'HEAD')
+                # NULL default_branch reachability: coalesce(...,'HEAD')
                 # resolves the same way here as at the compiler/semantic/backfill sites.
                 null_default_file = _tool_json(
                     await session.call_tool(

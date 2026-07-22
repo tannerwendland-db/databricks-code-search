@@ -1,7 +1,7 @@
-"""Post-deploy smoke test for the code-search MCP app (issue #12).
+"""Post-deploy smoke test for the code-search MCP app.
 
 Proves a *real* result after ``make deploy``, never a false green. Each probe has an
-explicit meaning (see the grant-oracle table in ``.omc/plans/issue-12-deploy-plan.md``):
+explicit meaning:
 
 * ``GET /health`` == 200  -> liveness (ALWAYS).
 * ``GET /ready``  == 200  -> the app SP's SELECT grant landed; this is the always-on

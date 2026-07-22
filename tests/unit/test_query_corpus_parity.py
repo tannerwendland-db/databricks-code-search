@@ -1,4 +1,4 @@
-"""Cross-language parity gate for issue #47's flat-AND query recognizer.
+"""Cross-language parity gate for the flat-AND query recognizer.
 
 webui/frontend/src/utils/queryModel.corpus.json is the single source of truth shared
 with webui/frontend/src/utils/queryModel.corpus.test.ts: this test asserts the same

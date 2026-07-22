@@ -1,4 +1,4 @@
-"""Unit tests for the MCP server serialization + error mapping + observability (issue #11).
+"""Unit tests for the MCP server serialization + error mapping + observability.
 
 No DB, no SDK: the payload builders (``_search_code_payload`` / ``_list_repos_payload`` /
 ``_get_file_payload``) are driven with a fake engine/connection and a fake ``GrepResult`` so
@@ -191,7 +191,7 @@ def test_search_code_query_parse_error_maps_to_field() -> None:
     assert payload["file_count"] == 0
     assert payload["match_count"] == 0
     assert payload["query_too_broad"] is False
-    # An unparseable query was never classified, so neither shape flag can be proven. [AC4]
+    # An unparseable query was never classified, so neither shape flag can be proven.
     assert payload["no_content_atom"] is False
     assert payload["zero_width_only_atoms"] is False
 
@@ -208,7 +208,7 @@ def test_search_code_query_too_broad_maps_to_signal(monkeypatch: pytest.MonkeyPa
     assert payload["truncated"] is True
     assert payload["files"] == []
     assert payload["query_parse_error"] is None
-    # grep never returned, so there is no shape fact to report. [AC4]
+    # grep never returned, so there is no shape fact to report.
     assert payload["no_content_atom"] is False
     assert payload["zero_width_only_atoms"] is False
 
@@ -375,7 +375,7 @@ def test_sym_truncation_sets_row_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["truncation_reason"] == "row_cap"
 
 
-# ------------------------------------------------------ query-shape flags on the envelope (#31)
+# ------------------------------------------------------ query-shape flags on the envelope
 #
 # The envelope's job is suppression: grep's raw per-leg fact ANDed with "the symbol leg did
 # not answer this query". These pin both directions of that AND.
@@ -404,8 +404,8 @@ def _one_sym() -> SymbolResult:
 
 @pytest.mark.unit
 def test_filter_only_grep_sets_no_content_atom_on_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The reported bug (AC1): `file:.md` returns zero files and the agent cannot tell that
-    # from "no .md file contains anything". Now it can.
+    # `file:.md` returns zero files and the agent cannot tell that from "no .md file
+    # contains anything". Now it can.
     monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep(no_content_atom=True))
     monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
 
@@ -420,7 +420,7 @@ def test_filter_only_grep_sets_no_content_atom_on_envelope(monkeypatch: pytest.M
 
 @pytest.mark.unit
 def test_genuine_zero_match_does_not_set_no_content_atom(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The other half of AC1: an ordinary true negative reaches the SAME file_count of 0 with
+    # An ordinary true negative reaches the SAME file_count of 0 with
     # the flag False. The pair is what makes the signal informative.
     monkeypatch.setattr(service, "grep_search", lambda *a, **k: _grep())
     monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())
@@ -481,7 +481,7 @@ def test_zero_width_with_sym_answer_is_suppressed(monkeypatch: pytest.MonkeyPatc
 def test_zero_width_query_sets_flag_without_regex_incompatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # AC3: `/^/` compiled fine, so regex_incompatible stays False -- the two signals are
+    # `/^/` compiled fine, so regex_incompatible stays False -- the two signals are
     # distinct conditions and the envelope mirrors both faithfully.
     monkeypatch.setattr(
         service,
@@ -522,7 +522,7 @@ def test_envelope_keys_are_pinned_shape_plus_exactly_two(monkeypatch: pytest.Mon
     assert pinned <= set(payload)
     # The commit-search keys (`resolved`/`commit_not_indexed`) are additive and OMITTED for a
     # query with no commit: atom, so a non-commit query's shape is byte-identical to before --
-    # only the two issue-#31 shape flags are added. (The commit-query shape is pinned separately
+    # only the two shape flags are added. (The commit-query shape is pinned separately
     # by test_envelope_carries_commit_keys_only_for_commit_query.)
     assert set(payload) - pinned == {"no_content_atom", "zero_width_only_atoms"}
 
@@ -556,7 +556,7 @@ def test_envelope_carries_commit_keys_only_for_commit_query(
 
 @pytest.mark.unit
 def test_search_code_bare_commit_is_reverse_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Mood 1 (AC2): bare `commit:<hash>` returns the resolution + empty files; NEITHER leg runs.
+    # A bare `commit:<hash>` returns the resolution + empty files; NEITHER leg runs.
     rc = service.ResolvedCommit(
         repo="acme/widgets",
         branch="release-2.1",
@@ -605,7 +605,7 @@ def test_search_code_commit_file_lang_only_is_still_bare(monkeypatch: pytest.Mon
 def test_search_code_commit_no_resolution_flags_not_indexed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # AC5: an unresolvable hash yields empty files + commit_not_indexed, NEVER an unfiltered
+    # An unresolvable hash yields empty files + commit_not_indexed, NEVER an unfiltered
     # search -- the content leg must not run.
     monkeypatch.setattr(service, "resolve_commit_prefix", lambda conn, prefix: [])
     monkeypatch.setattr(
@@ -624,7 +624,7 @@ def test_search_code_commit_no_resolution_flags_not_indexed(
 def test_search_code_scoped_commit_attaches_resolved_and_commit_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Mood 2 (AC3/AC9): `commit:<hash> <terms>` runs the search scoped to the resolved head and
+    # `commit:<hash> <terms>` runs the search scoped to the resolved head and
     # returns both the `resolved` payload and per-file commit metadata sourced from it.
     rc = service.ResolvedCommit(
         repo="acme/widgets", branch="release-2.1", commit="abc1234def", index_time=None
@@ -982,7 +982,7 @@ def test_search_code_splits_divergent_content_versions_of_one_path(
         zero_width_only_atoms=False,
         next_cursor=None,
     )
-    # The payload builder lives in app/service.py (issue #35 extraction), so it resolves
+    # The payload builder lives in app/service.py, so it resolves
     # grep_search/symbol_search from THAT module's globals -- patch service.*, not main.*.
     monkeypatch.setattr(service, "grep_search", lambda *a, **k: result)
     monkeypatch.setattr(service, "symbol_search", lambda *a, **k: _no_sym())

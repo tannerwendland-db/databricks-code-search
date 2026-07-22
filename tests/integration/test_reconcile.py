@@ -5,9 +5,8 @@ raw ``chunks`` DDL as test_store_chunk_writer.py (``chunks`` is deliberately
 outside ``Base.metadata`` -- see app/db/semantic.py) so cascade deletes can be
 proven for both ``symbols`` and ``chunks`` in one place.
 
-Phase 1 of the corpus-reconciliation epic (#56): this is a pure storage
-primitive, exercised directly rather than through any job wiring (unwired
-until #59).
+This is a pure storage primitive for corpus reconciliation, exercised
+directly here rather than through the job wiring that consumes it.
 """
 
 from __future__ import annotations
