@@ -138,11 +138,52 @@ class RepoConfig(BaseModel):
     :func:`effective_workers`. That clamp is a **memory** bound, not a CPU one:
     embedding materialises a whole repo's chunks in memory (~0.5-0.8 GB per
     worker; 260 MB of vectors alone at the 8000-chunk ceiling).
+
+    ``semantic_max_chunks_per_repo`` overrides that global 8000-chunk ceiling
+    (``app.config.Settings.semantic_max_chunks_per_repo``) for individual repos
+    named here, without moving the global default. It does NOT relax the
+    2-worker semantic clamp above -- a large override still multiplies the
+    per-worker memory cost of whichever of the (at most 2) concurrent semantic
+    workers happens to be indexing that repo.
     """
 
     version: Literal[1]
     connections: list[Connection] = Field(min_length=1)
     index_concurrency: int = Field(default=4, ge=1, le=8)
+
+    # Per-repo override of Settings.semantic_max_chunks_per_repo (app/config.py, default
+    # 8000), keyed by repo. Absent (the default) -> no repo gets an override, and
+    # indexer.resolve.resolve_repos leaves RepoEntry.semantic_max_chunks at None, which
+    # indexer/job.py reads as "use the global cap" -- an unmodified config is unaffected.
+    # `ge=1` on the value type (not a separate validator) rejects 0/negative/non-int with
+    # pydantic's own message, matching index_concurrency's pattern above.
+    semantic_max_chunks_per_repo: dict[str, Annotated[int, Field(ge=1)]] = {}
+
+    @model_validator(mode="after")
+    def _normalize_semantic_overrides(self) -> RepoConfig:
+        """Canonicalise override keys through ``normalize_repo`` and reject collisions.
+
+        Runs at config-parse time, not at resolve time: a typo'd URL-style key
+        (``https://github.com/acme/widgets``) must canonicalise to the same
+        ``org/repo`` the corpus resolves to, or the override would silently never
+        match. Two keys that only differ by case (``Acme/Widgets`` vs
+        ``acme/widgets``) are the same GitHub repo, so YAML's own case-sensitive
+        mapping keys would otherwise let both through and silently pick one.
+        """
+        normalized: dict[str, int] = {}
+        seen_casefold: set[str] = set()
+        for raw_key, cap in self.semantic_max_chunks_per_repo.items():
+            key = normalize_repo(raw_key)
+            folded = key.casefold()
+            if folded in seen_casefold:
+                raise ValueError(
+                    "semantic_max_chunks_per_repo has duplicate keys for "
+                    f"{key!r} (case-insensitively)"
+                )
+            seen_casefold.add(folded)
+            normalized[key] = cap
+        self.semantic_max_chunks_per_repo = normalized
+        return self
 
 
 def effective_workers(config: RepoConfig, *, semantic_enabled: bool) -> int:

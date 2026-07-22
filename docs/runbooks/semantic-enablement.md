@@ -111,6 +111,16 @@ scales memory linearly (50000 would be ~1.6 GB and would OOM a typical job conta
 If a repo legitimately needs more, prefer the temp-table staging path (follow-up) over
 raising this number.
 
+**Per-repo override, without moving the global default:** `config.yaml`'s top-level
+`semantic_max_chunks_per_repo` map (`indexer/repo_config.py`) lets one outsized repo
+get its own cap — `indexer/resolve.py` carries the matched override onto that repo's
+`RepoEntry`, and `indexer/job.py` uses it in place of `cfg.semantic_max_chunks_per_repo`
+for that repo only (an active override is logged at INFO). It does not relax the
+2-worker semantic clamp above, so a large override still multiplies whichever of the
+(at most 2) concurrent workers happens to be indexing that repo — do the same ~32
+KB/chunk math against the override value, not just the global default, before setting
+one.
+
 **Parallelism:** with semantic on by default, the `effective_workers` clamp to 2 in
 `indexer/job.py` now applies to every index run by default (each worker materialises a
 whole repo's chunks) — see `docs/runbooks/indexing-parallelism.md`.

@@ -372,3 +372,81 @@ def test_branch_globs_are_independent_per_repo() -> None:
         "acme/a": frozenset({"release/*"}),
         "acme/b": frozenset(),
     }
+
+
+# --- RepoEntry.semantic_max_chunks: per-repo chunk-cap override -------------
+
+
+def _config_with_overrides(
+    *connections: dict[str, Any], semantic_max_chunks_per_repo: dict[str, int]
+) -> RepoConfig:
+    return RepoConfig.model_validate(
+        {
+            "version": 1,
+            "connections": [{"type": "github", **c} for c in connections],
+            "semantic_max_chunks_per_repo": semantic_max_chunks_per_repo,
+        }
+    )
+
+
+@pytest.mark.unit
+def test_semantic_max_chunks_carried_onto_the_matching_entry() -> None:
+    entries = _resolve_entries(
+        _config_with_overrides(
+            {"repos": ["acme/widgets"]}, semantic_max_chunks_per_repo={"acme/widgets": 20000}
+        ),
+        orgs=_Enumerator(),
+        users=_Enumerator(),
+    )
+    assert entries == [
+        RepoEntry(name="acme/widgets", branch_globs=frozenset(), semantic_max_chunks=20000)
+    ]
+
+
+@pytest.mark.unit
+def test_semantic_max_chunks_matches_case_insensitively() -> None:
+    """The override's key was canonicalised (RepoConfig), but the resolved repo's
+    spelling comes from GitHub's enumeration and may differ only in case."""
+    orgs = _Enumerator({"acme": [_meta("IceRhymers/MyRepo")]})
+    entries = _resolve_entries(
+        _config_with_overrides(
+            {"orgs": ["acme"]}, semantic_max_chunks_per_repo={"icerhymers/myrepo": 15000}
+        ),
+        orgs=orgs,
+        users=_Enumerator(),
+    )
+    assert entries == [
+        RepoEntry(name="IceRhymers/MyRepo", branch_globs=frozenset(), semantic_max_chunks=15000)
+    ]
+
+
+@pytest.mark.unit
+def test_repo_without_an_override_gets_none() -> None:
+    entries = _resolve_entries(
+        _config_with_overrides(
+            {"repos": ["acme/widgets", "acme/gadgets"]},
+            semantic_max_chunks_per_repo={"acme/widgets": 20000},
+        ),
+        orgs=_Enumerator(),
+        users=_Enumerator(),
+    )
+    by_name = {e.name: e.semantic_max_chunks for e in entries}
+    assert by_name == {"acme/widgets": 20000, "acme/gadgets": None}
+
+
+@pytest.mark.unit
+def test_unmatched_override_key_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """A typo'd or removed repo in the override map must not silently do nothing --
+    it is named in a WARNING so an operator can catch the typo."""
+    with caplog.at_level(logging.WARNING, logger="indexer.resolve"):
+        entries = _resolve_entries(
+            _config_with_overrides(
+                {"repos": ["acme/widgets"]},
+                semantic_max_chunks_per_repo={"acme/typo-d-repo": 20000},
+            ),
+            orgs=_Enumerator(),
+            users=_Enumerator(),
+        )
+    assert entries == [RepoEntry(name="acme/widgets", branch_globs=frozenset())]
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("semantic_max_chunks_per_repo" in m and "acme/typo-d-repo" in m for m in messages)

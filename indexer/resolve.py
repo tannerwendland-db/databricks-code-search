@@ -57,6 +57,12 @@ class RepoEntry:
 
     name: str
     branch_globs: frozenset[str]
+    # The repo's ``semantic_max_chunks_per_repo`` config override, or ``None`` if no
+    # override matched -- indexer/job.py reads ``None`` as "use the global cap"
+    # (``app.config.Settings.semantic_max_chunks_per_repo``). Defaulted so every
+    # existing ``RepoEntry(name=..., branch_globs=...)`` construction (tests included)
+    # keeps working unchanged.
+    semantic_max_chunks: int | None = None
 
 
 class EmptyConfigError(Exception):
@@ -209,7 +215,37 @@ def resolve_repos(
         connection_word,
     )
     logger.info("resolved repos: %s", _format_names(resolved))
-    return [
-        RepoEntry(name=name, branch_globs=frozenset(globs_by_key[name.casefold()]))
-        for name in resolved
-    ]
+
+    # Casefolded once here, not per resolved repo: config.semantic_max_chunks_per_repo's
+    # keys are already normalize_repo-canonicalised (RepoConfig's own model validator), so
+    # this is purely a case-insensitive lookup against the resolved names, never another
+    # normalize_repo call.
+    overrides_by_key = {
+        name.casefold(): (name, cap) for name, cap in config.semantic_max_chunks_per_repo.items()
+    }
+    matched_keys: set[str] = set()
+    entries: list[RepoEntry] = []
+    for name in resolved:
+        key = name.casefold()
+        override = overrides_by_key.get(key)
+        cap = None
+        if override is not None:
+            matched_keys.add(key)
+            cap = override[1]
+        entries.append(
+            RepoEntry(name=name, branch_globs=frozenset(globs_by_key[key]), semantic_max_chunks=cap)
+        )
+
+    # A typo in the override map (a repo that no longer exists, a misspelled name) is a
+    # silent no-op otherwise -- the repo just quietly keeps the global cap. Named here,
+    # not raised, because it must not fail an otherwise-healthy run over a config typo.
+    unmatched = sorted(
+        orig_name for key, (orig_name, _cap) in overrides_by_key.items() if key not in matched_keys
+    )
+    if unmatched:
+        logger.warning(
+            "semantic_max_chunks_per_repo override(s) matched no resolved repo: %s",
+            ", ".join(unmatched),
+        )
+
+    return entries
