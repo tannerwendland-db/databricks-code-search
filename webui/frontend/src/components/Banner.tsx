@@ -1,11 +1,10 @@
 import { recognize } from "../utils/queryModel";
 import type { SearchBanners } from "../utils/searchReducer";
 
-// Banners come ONLY from these envelope fields (ralplan-35 A2 contract) -- never inferred
-// from an empty `files` list, which is legitimately reachable via no_content_atom /
-// zero_width_only_atoms without any of these signals firing. `resolved` / `commitNotIndexed`
-// (ralplan-commit-hash-search step 6) extend this the same way: additive envelope fields, not
-// inferred from `files`.
+// Banners come ONLY from these envelope fields -- never inferred from an empty `files`
+// list, which is legitimately reachable via no_content_atom / zero_width_only_atoms
+// without any of these signals firing. `resolved` / `commitNotIndexed` extend this the
+// same way: additive envelope fields, not inferred from `files`.
 
 /** The `resolved` payload has no "typed prefix" field (see ResolvedCommit) -- match each
  * resolution back to whichever `commit:` atom in the searched query it satisfies, so the

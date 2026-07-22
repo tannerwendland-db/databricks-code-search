@@ -12,7 +12,7 @@ Hermetic unit tests: no network, no database, no Databricks SDK instantiation. E
 | `__init__.py` | Empty package marker. |
 | `test_branches.py` | `indexer.branches.resolve_branches`: glob matching, dedup, cap; empty globs → default branch only. |
 | `test_chunk_store.py` | `indexer.chunk_store.write_chunks` statement shape via a fake `Connection` recording `execute` calls; delete-then-insert, and proof no embedding call happens here. |
-| `test_chunking.py` | `indexer.parse.iter_chunks` chunking behavior (issue #14 Phase 1). |
+| `test_chunking.py` | `indexer.parse.iter_chunks` chunking behavior. |
 | `test_ci_branch.py` | `scripts/ci_branch.py` lifecycle with the SDK fully faked; pins that teardown NEVER raises and every create carries a TTL (leak protection for cancelled CI runs). |
 | `test_db_client.py` | Engine factory local (`PGHOST`) mode builds without instantiating the SDK; ORM models expose exactly the durable-core columns, constraints, and GIN indexes. |
 | `test_embed.py` | `app.embed`: batching, retry, dim-mismatch, lazy SDK import — every test injects a fake `client`, `databricks.sdk` is never imported. |
@@ -28,8 +28,8 @@ Hermetic unit tests: no network, no database, no Databricks SDK instantiation. E
 | `test_parse.py` | `indexer.parse.iter_source_files` against a temp directory tree. |
 | `test_placeholder.py` | Trivial `assert True` placeholder. |
 | `test_query_compiler.py` | Query compiler AST → SQLAlchemy `Select`; statements rendered via `stmt.compile(dialect=postgresql.dialect())` and asserted on operator fragments + bound params. |
-| `test_query_corpus_parity.py` | Cross-language parity gate: asserts the same verdicts as the TS suite over the shared `webui/frontend/src/utils/queryModel.corpus.json` (issue #47). |
-| `test_query_parser.py` | Zoekt query parser (issue #8). |
+| `test_query_corpus_parity.py` | Cross-language parity gate: asserts the same verdicts as the TS suite over the shared `webui/frontend/src/utils/queryModel.corpus.json`. |
+| `test_query_parser.py` | Zoekt query parser. |
 | `test_repo_config.py` | `indexer.repo_config` schema/parsing/canonicalisation; workspace read seam faked with `io.BytesIO`; pins the import-light property (must NOT import `indexer.job`). |
 | `test_resolve.py` | `indexer.resolve` filtering/dedup/fail-fast with injected enumerators (`httpx.Client` passed as `None`). |
 | `test_semantic.py` | `app.search.semantic`: flag-off no-op proven against a poisoned engine, RRF SQL shape, vector-literal formatting via `repr`. |

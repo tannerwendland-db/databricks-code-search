@@ -389,7 +389,7 @@ def test_semantic_block_rejects_out_of_bound_values(field: str, value: bytes) ->
 
 @pytest.mark.unit
 def test_bad_semantic_block_surfaces_as_config_error_through_parse_config() -> None:
-    """AC 4: a misvalidated ``semantic:`` block fails the run at parse time with the
+    """A misvalidated ``semantic:`` block fails the run at parse time with the
     ConfigError contract (path in the message), exactly like index_concurrency."""
     raw = (
         b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"

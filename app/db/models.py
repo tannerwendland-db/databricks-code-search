@@ -1,11 +1,11 @@
 """SQLAlchemy 2.0 models for the durable code search core.
 
 Covers ``repos`` / ``files`` / ``symbols`` / ``repo_branches``. No ``chunks`` /
-``VECTOR`` / ``tsvector`` (Phase 4, separate version table). ``Base.metadata`` is
+``VECTOR`` / ``tsvector`` (a separate version table). ``Base.metadata`` is
 the authoritative desired-state: it also declares the pg_trgm and
 ``files.branches`` GIN indexes so Alembic autogenerate emits them and there is
-no future drift. Issue #5 owns the single ``CREATE EXTENSION IF NOT EXISTS
-pg_trgm``; ``pgcrypto`` is created by the ``0003`` migration only (sequenced
+no future drift. The 0001 migration owns the single ``CREATE EXTENSION IF NOT
+EXISTS pg_trgm``; ``pgcrypto`` is created by the ``0003`` migration only (sequenced
 before its digest-based backfill).
 """
 
@@ -127,8 +127,8 @@ class RepoBranch(Base):
 
     Replaces the single ``repos``-level stamp as the source of truth for
     skip-if-unchanged and ``StaleIndexError`` guarding -- one row per branch a
-    repo's config resolves to, indexed independently (plan Option A1: branches
-    are sequential within a repo, so no same-repo concurrent writer ever exists).
+    repo's config resolves to, indexed independently (branches are sequential
+    within a repo, so no same-repo concurrent writer ever exists).
     """
 
     __tablename__ = "repo_branches"

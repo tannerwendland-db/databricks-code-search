@@ -1,4 +1,4 @@
-"""Unit tests for indexer.parse.iter_chunks (issue #14 Phase 1)."""
+"""Unit tests for indexer.parse.iter_chunks."""
 
 from __future__ import annotations
 

@@ -9,9 +9,8 @@ dedup key alongside ``repo_id``/``path``) and ``branches`` (a GIN-indexed
 membership array), and a new ``repo_branches`` table becomes the authoritative
 per-(repo, branch) CAS registry, replacing the single ``repos``-level stamp.
 
-Backfill strategy: **Option B1** (in-DB ``pgcrypto`` digest), decided by the
-Phase-0 gate -- see ``.omc/plans/open-questions.md`` for the recorded evidence.
-``pgcrypto``'s ``digest(...,'sha256')`` was proven byte-identical to
+Backfill strategy: an in-DB ``pgcrypto`` digest. ``pgcrypto``'s
+``digest(...,'sha256')`` was proven byte-identical to
 ``indexer.hashing.content_sha`` (the canonical Python helper every subsequent
 indexer write goes through) across ascii, multibyte UTF-8, empty, ``NULL``, and
 trailing-newline content
@@ -45,8 +44,7 @@ def upgrade() -> None:
     op.add_column("files", sa.Column("content_sha", sa.Text(), nullable=True))
     op.add_column("files", sa.Column("branches", postgresql.ARRAY(sa.Text()), nullable=True))
 
-    # pgcrypto must exist before digest() below. Proven usable by the migrator
-    # identity in the Phase-0 gate (see module docstring).
+    # pgcrypto must exist before digest() below (proven usable by the migrator identity).
     op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
     op.execute(
         "UPDATE files SET content_sha = encode(digest(coalesce(content,''),'sha256'),'hex') "

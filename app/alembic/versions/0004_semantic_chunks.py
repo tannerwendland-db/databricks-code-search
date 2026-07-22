@@ -22,14 +22,13 @@ See ``docs/runbooks/semantic-enablement.md``.
 **Idempotency guard:** a project that already ran the old gated migration has
 ``chunks`` (and possibly ``alembic_version_semantic``). ``to_regclass('chunks')``
 short-circuits the CREATE DDL for that case -- this revision then only adds the
-``start_line``/``end_line`` columns the gated revision predates (issue #44), records
-itself in the core ``alembic_version``, and drops the orphaned semantic version table.
+``start_line``/``end_line`` columns the gated revision predates, records itself in the
+core ``alembic_version``, and drops the orphaned semantic version table.
 
-**Line ranges (issue #44):** ``start_line``/``end_line`` (1-based, inclusive) are
-NULLABLE -- rows written before the line-aware chunk writer stay NULL until the next
-re-index naturally backfills them (the INDEX_SEMANTICS_VERSION bump forces exactly
-that), and readers must treat NULL as "no authoritative range" (the webui falls back
-to its needle-match anchor).
+Line ranges: ``start_line``/``end_line`` (1-based, inclusive) are NULLABLE -- rows
+written before the line-aware chunk writer stay NULL until the next re-index naturally
+backfills them (the INDEX_SEMANTICS_VERSION bump forces exactly that), and readers must
+treat NULL as "no authoritative range" (the webui falls back to its needle-match anchor).
 
 Ground truth (captured 2026-07-19 against the live ``code-search`` Lakebase project,
 Postgres 17, on a disposable branch): the ANN access method is ``lakebase_ann`` with
@@ -59,8 +58,8 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # Idempotency guard: a project that ran the old gated `migrate-semantic` already has
     # the table (created by the retired 0002sem revision). Skip the CREATE DDL, add only
-    # the line-range columns that revision predates (issue #44; IF NOT EXISTS makes a
-    # re-run safe), and clean up the orphaned separate version table; this revision
+    # the line-range columns that revision predates (IF NOT EXISTS makes a re-run safe),
+    # and clean up the orphaned separate version table; this revision
     # still lands in `alembic_version`.
     bind = op.get_bind()
     if bind.execute(text("SELECT to_regclass('chunks')")).scalar() is not None:
@@ -91,7 +90,7 @@ def upgrade() -> None:
         "file_id integer NOT NULL REFERENCES files(id) ON DELETE CASCADE, "
         "chunk_index integer NOT NULL, "
         "content text NOT NULL, "
-        # 1-based inclusive line range of the chunk within its file (issue #44).
+        # 1-based inclusive line range of the chunk within its file.
         # NULLABLE: rows from a pre-line-aware writer stay NULL until re-indexed,
         # and readers fall back to needle-matching when absent.
         "start_line integer, "

@@ -33,10 +33,10 @@ variables:
     description: "Postgres major version (schema-typed int)."
     default: 17
   app_name:
-    description: "Databricks App name (must start with mcp-). Consumed by the app resource in #11/#12."
+    description: "Databricks App name (must start with mcp-). Consumed by resources/app.yml."
     default: mcp-code-search
   webui_app_name:
-    description: "Databricks App name for the web UI (second app, #35). Consumed by resources/webui.yml."
+    description: "Databricks App name for the web UI (second app). Consumed by resources/webui.yml."
     default: webui-code-search
   job_run_as_sp:
     description: >-
@@ -45,7 +45,7 @@ variables:
       for every declared variable, even ones referenced only in another target). The
       role is declared only under targets.prod, so an empty value never reaches dev.
       Prod deploy MUST pass --var job_run_as_sp=<client-id> (an empty value would create
-      a broken NO-LOGIN role) — the prod deploy target (#12) enforces this.
+      a broken NO-LOGIN role) — the prod deploy target enforces this.
     default: ""
 
 include:
@@ -58,7 +58,7 @@ include:
 sync:
   include:
     - config.yaml
-    # The webui App (#35) installs on the uv path (Python 3.12) and needs BOTH pyproject.toml
+    # The webui App installs on the uv path (Python 3.12) and needs BOTH pyproject.toml
     # (synced by default) and uv.lock. But uv.lock is gitignored globally (see .gitignore) and
     # bundle sync applies .gitignore *silently* (cli#3547) -- without this force-include the App
     # would ship no lock, fail to select the uv path, and fall back to pip/3.11 where the

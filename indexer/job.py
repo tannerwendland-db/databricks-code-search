@@ -8,7 +8,7 @@ fetched, so a bad config exits non-zero having indexed nothing and without ever
 opening a database connection.
 
 Orchestrates, per resolved repo: resolve the default branch's HEAD -> resolve the
-repo's concrete branch list (config globs, plan Option A1) -> for each branch,
+repo's concrete branch list from the config globs -> for each branch,
 SEQUENTIALLY: resolve its HEAD SHA -> download the tarball by that immutable SHA
 -> extract -> parse text files -> extract symbols -> atomic upsert + mark-and-sweep
 via :func:`indexer.store.index_repo`. Branches within one repo are sequential
@@ -17,27 +17,26 @@ sweep sound without an advisory lock. Each BRANCH is isolated: one branch's
 failure or CAS conflict does not stop its repo's other branches from being
 attempted, and the process exits non-zero if any branch fails.
 
-Each repo's worker returns a :class:`RepoOutcome` (#61): its per-branch
-``outcomes`` plus ``discovery_complete``, mirroring
-:class:`indexer.branches.BranchResolution` -- ``False`` when the soft branch
-cap truncated that repo's concrete branch list, so its resolved set must not be
-trusted as evidence the repo has no OTHER branches to reconcile against. This
-run's drain loop still only reads ``outcomes`` for its ok/skipped/conflict/failed
-counters, unchanged; ``discovery_complete`` is surfaced for a future
-reconciliation gate (#59) to collect across repos, not consumed here.
+Each repo's worker returns a :class:`RepoOutcome`: its per-branch ``outcomes``
+plus ``discovery_complete``, mirroring :class:`indexer.branches.BranchResolution`
+-- ``False`` when the soft branch cap truncated that repo's concrete branch list,
+so its resolved set must not be trusted as evidence the repo has no OTHER branches
+to reconcile against. The drain loop reads only ``outcomes`` for its
+ok/skipped/conflict/failed counters; ``discovery_complete`` is collected across
+repos to gate the reconciliation checkpoint below.
 
 One logical corpus writer, at the RUN level: ``resources/job.yml`` pins
 ``max_concurrent_runs: 1`` (queueing retained), so at most one run of this job
-is ever fetching, deriving, or applying corpus state at a time -- the
-invariant global desired-state reconciliation (#56) depends on to avoid two
-runs deriving and applying different desired inventories concurrently. This is
-a SEPARATE invariant from the per-branch sequencing above: it bounds
-concurrent JOB RUNS, not what happens inside one run, and it does NOT cover a
-writer outside this job entirely (a second job, an ad hoc ``bundle run``, or a
-future per-repo/per-branch task-sharding split within one run). Any of those
-would need a shared database fencing/lease protocol before it could coexist
-with reconciliation -- see ``docs/runbooks/indexing-parallelism.md`` §1.1 for
-the full invariant and its coverage boundary.
+is ever fetching, deriving, or applying corpus state at a time -- the invariant
+desired-state reconciliation depends on to avoid two runs deriving and applying
+different desired inventories concurrently. This is a SEPARATE invariant from the
+per-branch sequencing above: it bounds concurrent JOB RUNS, not what happens
+inside one run, and it does NOT cover a writer outside this job entirely (a
+second job, an ad hoc ``bundle run``, or a future per-repo/per-branch
+task-sharding split within one run). Any of those would need a shared database
+fencing/lease protocol before it could coexist with reconciliation -- see
+``docs/runbooks/indexing-parallelism.md`` §1.1 for the full invariant and its
+coverage boundary.
 
 Repos are worked on concurrently by a bounded ``ThreadPoolExecutor`` sized by
 ``config.index_concurrency`` (clamped by
@@ -73,12 +72,12 @@ loads (config.yaml > env > default; see
 ``effective_workers`` clamp, the embedder build, the per-repo chunk cap -- reads
 the overlaid ``cfg``.
 
-When ``cfg.semantic_enabled`` (issue #14), each repo's files are also chunked and
-embedded -- but OUTSIDE ``index_repo``'s transaction (A4): the embedder is called
-here, up front, and only a ``chunk_writer`` closure over the precomputed vectors
-is handed to ``index_repo``, which writes them (pure DML, no network) inside the
-same per-file loop as symbols. Flag-off: no chunking, no embedder, no import of
-``app.embed``'s lazy ``databricks-sdk`` dependency.
+When ``cfg.semantic_enabled``, each repo's files are also chunked and embedded --
+but OUTSIDE ``index_repo``'s transaction: the embedder is called here, up front,
+and only a ``chunk_writer`` closure over the precomputed vectors is handed to
+``index_repo``, which writes them (pure DML, no network) inside the same per-file
+loop as symbols. Flag-off: no chunking, no embedder, no import of ``app.embed``'s
+lazy ``databricks-sdk`` dependency.
 
 Logging is INFO only. The GitHub token is read via an injected client and is never
 logged, and this module never lowers root/SDK/httpx log levels (see the redaction
@@ -135,14 +134,14 @@ from indexer.symbols import extract_symbols
 
 logger = logging.getLogger("indexer.job")
 
-# Corpus-wide desired-state reconciliation (#56/#59) withholds the repo purge --
-# but NOT retired-branch cleanup on surviving repos -- when it would remove more
-# than this fraction of currently stored repos in one clean run. A narrowed
-# GitHub token/org scope returns a clean HTTP 200 with fewer repos than before,
-# which is indistinguishable from a legitimate mass decommission by count alone;
-# this guard converts a silent mass purge into a loud, recoverable incident
-# instead. Strict ``>``: a purge removing EXACTLY half proceeds. No config knob --
-# see indexer/AGENTS.md for the rationale and the staged-removal remedy.
+# Desired-state reconciliation withholds the repo purge -- but NOT retired-branch
+# cleanup on surviving repos -- when it would remove more than this fraction of
+# currently stored repos in one clean run. A narrowed GitHub token/org scope
+# returns a clean HTTP 200 with fewer repos than before, which is
+# indistinguishable from a legitimate mass decommission by count alone; this guard
+# converts a silent mass purge into a loud, recoverable incident instead. Strict
+# ``>``: a purge removing EXACTLY half proceeds. No config knob -- see
+# indexer/AGENTS.md for the rationale and the staged-removal remedy.
 MAX_PURGE_SHRINK_FRACTION = 0.5
 
 
@@ -150,10 +149,9 @@ MAX_PURGE_SHRINK_FRACTION = 0.5
 class BranchOutcome:
     """The result of attempting one branch within a repo's sequential loop.
 
-    ``counts`` is ``None`` for every status except ``"indexed"``. Classified the
-    SAME way ``run()``'s drain loop used to classify a whole repo's future
-    (``StaleIndexError`` -> ``"conflict"``, any other exception -> ``"failed"``)
-    -- but now caught INSIDE the per-branch loop so one branch's failure never
+    ``counts`` is ``None`` for every status except ``"indexed"``.
+    ``StaleIndexError`` maps to ``"conflict"`` and any other exception to
+    ``"failed"``, caught INSIDE the per-branch loop so one branch's failure never
     stops its repo's other branches from being attempted.
     """
 
@@ -164,25 +162,23 @@ class BranchOutcome:
 
 @dataclass(frozen=True)
 class RepoOutcome:
-    """The result of attempting every branch of one repo (#61).
+    """The result of attempting every branch of one repo.
 
     ``discovery_complete`` mirrors :class:`indexer.branches.BranchResolution`'s
     ``complete`` flag for this repo's concrete branch list: ``False`` means the
     soft cap truncated discovery, so ``outcomes`` covers only the KEPT branches
-    and must never be read as this repo's full branch membership. It is
-    production-WRITE-only here -- ``run()``'s drain loop still unpacks only
-    ``outcomes`` for its ok/skipped/conflict/failed counters, unchanged from
-    before this field existed. Collecting ``discovery_complete`` across repos to
-    gate reconciliation is #59's job, not this one's; this dataclass exists so
-    that collection has something typed to read once it lands.
+    and must never be read as this repo's full branch membership. ``run()``'s
+    drain loop unpacks only ``outcomes`` for its ok/skipped/conflict/failed
+    counters; ``discovery_complete`` is collected across repos to gate the
+    reconciliation checkpoint.
 
     A repo that fails BEFORE this object is constructed (a bad default-HEAD
     resolve, a branch-listing failure) has no ``RepoOutcome`` at all -- it
-    propagates as an exception and is still counted in ``run()``'s ``except``
-    branch, exactly as before. That absence is itself meaningful: it is a
-    stronger signal than ``discovery_complete=False`` and must stay
-    distinguishable from it, which is why this field is never defaulted to
-    ``False`` for a repo that never got this far.
+    propagates as an exception and is counted in ``run()``'s ``except`` branch.
+    That absence is itself meaningful: it is a stronger signal than
+    ``discovery_complete=False`` and must stay distinguishable from it, which is
+    why this field is never defaulted to ``False`` for a repo that never got
+    this far.
     """
 
     name: str
@@ -192,7 +188,7 @@ class RepoOutcome:
 
 @dataclass
 class ReconcileProgress:
-    """Mutable accumulator for the post-fan-out reconciliation checkpoint (#59).
+    """Mutable accumulator for the post-fan-out reconciliation checkpoint.
 
     Deliberately NOT frozen: ``_reconcile`` mutates one instance in place as it
     walks the retired-branch loop and then the purge decision, so a mid-sequence
@@ -272,23 +268,22 @@ def run(
 
     Boundaries are injectable for tests: ``workspace_client`` (secret + config
     read), ``http_client`` (GitHub HTTP), ``engine`` (DB), ``index_fn`` (the
-    store), ``embed_fn`` (issue #14 semantic chunking), ``config_loader`` (so
-    orchestration tests need no SDK fake), and ``reconcile_retired_fn`` /
-    ``reconcile_removed_fn`` (the #57/#58 storage primitives the post-fan-out
-    checkpoint below invokes -- mirroring ``index_fn``'s injection so
-    reconciliation tests need no real Postgres either). ``cfg`` defaults to the
-    process-cached :func:`app.config.get_settings`, then any ``semantic:`` fields
-    in config.yaml are overlaid onto it before the worker clamp and embedder build
-    (config.yaml > env > default -- config.yaml is the job's semantic-config
-    surface; see :class:`indexer.repo_config.SemanticOverrides`).
+    store), ``embed_fn`` (semantic chunking), ``config_loader`` (so orchestration
+    tests need no SDK fake), and ``reconcile_retired_fn`` / ``reconcile_removed_fn``
+    (the storage primitives the post-fan-out checkpoint below invokes -- mirroring
+    ``index_fn``'s injection so reconciliation tests need no real Postgres either).
+    ``cfg`` defaults to the process-cached :func:`app.config.get_settings`, then any
+    ``semantic:`` fields in config.yaml are overlaid onto it before the worker clamp
+    and embedder build (config.yaml > env > default -- config.yaml is the job's
+    semantic-config surface; see :class:`indexer.repo_config.SemanticOverrides`).
 
     ``resolve_repos`` is deliberately **not** injectable: the existing
     ``httpx.MockTransport`` seam already lets tests drive enumeration outcomes
     through the real resolver, and a fake one would let the fail-fast contract
     pass without exercising the wiring it exists to prove.
 
-    Reconciliation (#56/#59) is invoked ONLY from this function's post-fan-out
-    checkpoint, main-thread, after every worker has joined -- never from
+    Reconciliation is invoked ONLY from this function's post-fan-out checkpoint,
+    main-thread, after every worker has joined -- never from
     ``_index_one``/``_index_one_inner``/``_index_one_branch``. See
     ``test_reconcile_fns_never_referenced_from_worker_source`` in
     ``tests/unit/test_job.py`` for the tripwire that enforces it.
@@ -383,7 +378,7 @@ def run(
         )
 
     # Lazy embedder: built (and databricks-sdk imported) only when semantic
-    # search is enabled and no fake was injected (issue #14 A1).
+    # search is enabled and no fake was injected.
     #
     # Degrade rather than abort: get_embedder raises when semantic_embedding_endpoint is
     # unset, and letting that propagate would kill the WHOLE indexing run -- including every
@@ -480,7 +475,7 @@ def run(
                             outcome.counts.swept,
                         )
 
-        # Desired-state reconciliation checkpoint (#56/#59). MUST stay HERE: after
+        # Desired-state reconciliation checkpoint. MUST stay HERE: after
         # the ThreadPoolExecutor `with` above has exited (every worker joined --
         # __exit__ calls shutdown(wait=True)) and before the `finally` below (the
         # engine is still open). `stamps` is the snapshot _read_stamps took BEFORE
@@ -786,7 +781,7 @@ def _reconcile(
 def _precompute_chunk_writer(
     files: list[ParsedFile], embed_fn: EmbedFn, max_chunks_per_repo: int
 ) -> ChunkWriter:
-    """Chunk + embed every file up front (issue #14 A4: no network inside conn.begin()).
+    """Chunk + embed every file up front, so no network call happens inside conn.begin().
 
     Returns a :data:`indexer.store.ChunkWriter` closure over the precomputed
     ``(chunk_index, content, start_line, end_line, embedding)`` tuples, keyed by
@@ -842,11 +837,11 @@ def _index_one(
 ) -> RepoOutcome:
     """Run the full fetch -> parse -> symbols -> store pipeline for every branch of one repo.
 
-    Branches are processed SEQUENTIALLY (plan Option A1) so no concurrent writer
-    for this repo ever exists -- the invariant ``store.py``'s per-branch sweep
-    depends on. Each branch's outcome is independent (see :class:`BranchOutcome`):
-    one branch failing or conflicting does not stop this repo's other branches
-    from being attempted.
+    Branches are processed SEQUENTIALLY so no concurrent writer for this repo
+    ever exists -- the invariant ``store.py``'s per-branch sweep depends on. Each
+    branch's outcome is independent (see :class:`BranchOutcome`): one branch
+    failing or conflicting does not stop this repo's other branches from being
+    attempted.
     """
     started = time.monotonic()
     # Set FIRST, before normalize_repo, so a malformed entry's ValueError still
@@ -1004,7 +999,7 @@ def _index_one_branch(
             if cfg.semantic_enabled and embed_fn is not None:
                 # Chunking/embedding needs the full file list up front -- unlike
                 # the lazy items generator below, it cannot stream through
-                # index_repo's open transaction (A4).
+                # index_repo's open transaction.
                 files = list(iter_source_files(root))
                 try:
                     chunk_writer = _precompute_chunk_writer(files, embed_fn, max_chunks_per_repo)
@@ -1050,9 +1045,9 @@ def _index_one_branch(
         # It is excluded from the exit code because it is an invariant
         # assertion, not an expected failure path (see StaleIndexError in
         # indexer/store.py). It earns its keep by failing loudly if
-        # for_each_task sharding lands, per-branch parallel fan-out (plan
-        # Option A2) ships, or someone raises max_concurrent_runs -- any of
-        # which removes the single-writer-per-repo property above.
+        # for_each_task sharding lands, per-branch parallel fan-out ships, or
+        # someone raises max_concurrent_runs -- any of which removes the
+        # single-writer-per-repo property above.
         #
         # Should it ever fire, the branch self-heals: the next run sees a
         # stamp it does not match and re-indexes it.
@@ -1102,7 +1097,7 @@ def main() -> None:
     # interleaving the repo field exists to disambiguate.
     for handler in logging.getLogger().handlers:
         handler.addFilter(RepoLogFilter())
-    # Capture the serverless interpreter version in the run log (M2 live gate).
+    # Capture the serverless interpreter version in the run log.
     logger.info("code-search-index starting on Python %s", sys.version)
 
     parser = argparse.ArgumentParser(description="Index GitHub repos into the code search DB.")

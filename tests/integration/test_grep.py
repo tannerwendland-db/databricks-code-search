@@ -1,4 +1,4 @@
-"""Integration tests for grep search (issue #10): query -> executed SQL -> line matches.
+"""Integration tests for grep search: query -> executed SQL -> line matches.
 
 Requires a running Postgres with the standard PG* env set. Mirrors the throwaway-schema
 idiom of ``tests/integration/test_query_compiler.py`` (unique schema, ``SET search_path``,
@@ -111,8 +111,8 @@ def seeded() -> Iterator[Seeded]:
             lang="python",
             content="# beta foo note\n# Foo capitalized here\n",
         )
-        # Markdown file: exists solely so `file:.md` -- the query from the reported issue #31
-        # incident -- has a genuine SQL-predicate match to return zero highlights for. Its
+        # Markdown file: exists solely so `file:.md` -- the query from a filter-only-match
+        # regression -- has a genuine SQL-predicate match to return zero highlights for. Its
         # content deliberately contains NO "foo"/"Foo" and nothing matching /f.o/ (it has no
         # "f" at all), so adding it leaves every existing exact-path assertion above untouched.
         _insert_file(
@@ -147,7 +147,7 @@ def test_grep_groups_matches_per_file_in_repo_id_path_order(seeded: Seeded) -> N
     assert _paths(result) == ["src/handler.go", "src/util.go", "pkg/note.py"]
     assert result.truncated is False
     assert result.truncation_reason is None
-    # An ordinary content query proves neither query-shape condition (#31).
+    # An ordinary content query proves neither query-shape condition.
     assert result.no_content_atom is False
     assert result.zero_width_only_atoms is False
 
@@ -320,7 +320,7 @@ def test_no_match_query_is_complete_and_untruncated(seeded: Seeded) -> None:
     assert result.zero_width_only_atoms is False
 
 
-# ------------------------------------------------------------ 10. query-shape flags (#31)
+# ------------------------------------------------------------ 10. query-shape flags
 
 
 @pytest.mark.integration
@@ -334,7 +334,7 @@ def test_filter_only_query_returns_no_files_but_flags_no_content_atom(
     # result comes purely from having nothing to highlight. Previously indistinguishable from
     # "no such file exists"; now announced. Keep `.md` first and keep it verbatim: if this
     # test ever fails, the reader should see the reported bug, not have to reconstruct it.
-    # `.py` rides along for a second extension's worth of coverage. [AC1]
+    # `.py` rides along for a second extension's worth of coverage.
     result = grep_search(seeded.conn, query)
     assert result.files == ()
     assert result.no_content_atom is True
@@ -346,7 +346,7 @@ def test_filter_only_query_returns_no_files_but_flags_no_content_atom(
 @pytest.mark.parametrize("query", [r"/^/", r"/\b/"])
 def test_zero_width_only_regex_flags_without_regex_incompatible(seeded: Seeded, query: str) -> None:
     # These compile fine (so regex_incompatible stays False) but every span is dropped as a
-    # zero-width match, leaving an empty result the old envelope could not explain. [AC3]
+    # zero-width match, leaving an empty result the old envelope could not explain.
     result = grep_search(seeded.conn, query)
     assert result.files == ()
     assert result.zero_width_only_atoms is True
@@ -356,7 +356,7 @@ def test_zero_width_only_regex_flags_without_regex_incompatible(seeded: Seeded, 
 
 @pytest.mark.integration
 def test_content_query_sets_neither_flag(seeded: Seeded) -> None:
-    # Same corpus as the grouping test: real matches, neither flag. [AC2]
+    # Same corpus as the grouping test: real matches, neither flag.
     result = grep_search(seeded.conn, "Handler")
     assert result.files
     assert result.no_content_atom is False
@@ -439,13 +439,13 @@ def test_grep_branch_filter_returns_only_named_branch_content(seeded: Seeded) ->
 # ["src/handler.go", "src/util.go", "pkg/note.py"] (both acme files, then the beta file --
 # see test 1). These pin grep_search's own `cursor` kwarg: mode gating (bare call vs
 # `cursor=` supplied at all, including `None`), the row-value WHERE predicate, and the
-# last-CANDIDATE-consumed resume key (issue #35 A2).
+# last-CANDIDATE-consumed resume key.
 
 
 @pytest.mark.integration
 def test_pagination_bare_call_is_byte_identical_to_legacy(seeded: Seeded) -> None:
     # No `cursor` kwarg at all: row-capped still means truncated=True/"row_cap", exactly the
-    # pre-#35 contract (see test_row_cap_truncates_result above) -- this pins the SAME
+    # pre-cursor contract (see test_row_cap_truncates_result above) -- this pins the SAME
     # assertion is unaffected by cursor's mere existence as a parameter.
     result = grep_search(seeded.conn, "foo", row_limit=2)
     assert result.truncated is True

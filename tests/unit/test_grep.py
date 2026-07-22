@@ -1,4 +1,4 @@
-"""Unit tests for grep line extraction + matcher building (issue #10).
+"""Unit tests for grep line extraction + matcher building.
 
 Pure, no DB. Targets :func:`extract_line_matches` and :func:`_build_matchers`; byte
 offsets are asserted against the invariant ``line_text.encode("utf-8")[s:e] == matched``.
@@ -184,7 +184,7 @@ def test_multiline_line_numbers_including_final_unterminated_line() -> None:
     assert [m.line_number for m in matches] == [1, 2, 4]
 
 
-# ------------------------------------------------------------------ query-shape flags (#31)
+# ------------------------------------------------------------------ query-shape flags
 #
 # Both helpers are driven through the real parse + _build_matchers pipeline (via `_patterns`)
 # rather than hand-built pattern lists, so what is pinned is the flag a real query produces.
@@ -304,7 +304,7 @@ def test_zero_width_helper_returns_false_when_parser_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Containment: a future CPython that moves/changes re._parser degrades the flag to False
-    # (the pre-#31 status quo), never propagates into grep_search.
+    # (the prior status quo before this flag existed), never propagates into grep_search.
     class _Broken:
         def parse(self, _src: str) -> object:
             raise AttributeError("re._parser moved")

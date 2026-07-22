@@ -1,4 +1,4 @@
-"""Write PRECOMPUTED chunk+embedding rows for one file into ``chunks`` (issue #14).
+"""Write PRECOMPUTED chunk+embedding rows for one file into ``chunks``.
 
 Mirrors ``indexer.store``'s connection seam: the caller supplies a live
 ``sqlalchemy.Connection`` and owns the transaction (``conn.begin()``); this
@@ -9,9 +9,9 @@ within the same per-file loop.
 
 This module never calls the embedder: ``chunks`` arrives with vectors already
 computed by :mod:`app.embed`, so writing them is pure DML with no network
-call inside the caller's lock window (issue #14 A4). ``ts`` is a ``GENERATED``
-column in production (backed by the beta ``lakebase_text`` extension) and is
-therefore never written here -- it derives from ``content``.
+call inside the caller's lock window. ``ts`` is a ``GENERATED`` column in
+production (backed by the beta ``lakebase_text`` extension) and is therefore
+never written here -- it derives from ``content``.
 
 Note: unlike ``symbols``, the current ``app.db.semantic.chunks`` schema has no
 ``repo_id`` column (chunks are scoped by ``file_id`` only, joining to
@@ -39,9 +39,8 @@ def write_chunks(
 
     ``chunks`` is a sequence of ``(chunk_index, content, start_line, end_line,
     embedding)`` tuples with embeddings already computed and 1-based inclusive
-    line ranges from the line-aligned chunker (issue #44). Runs inside the
-    caller's open transaction, alongside the rest of that file's ``index_repo``
-    work.
+    line ranges from the line-aligned chunker. Runs inside the caller's open
+    transaction, alongside the rest of that file's ``index_repo`` work.
     """
     conn.execute(delete(chunks_table).where(chunks_table.c.file_id == file_id))
     if not chunks:

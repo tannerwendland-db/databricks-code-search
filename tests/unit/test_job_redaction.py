@@ -35,7 +35,7 @@ SENTINEL = "ghp_SENTINEL_tok_do_not_log_0xDEADBEEF"
 _INDEXER_DIR = Path(__file__).resolve().parents[2] / "indexer"
 
 # Explicit repos: the pipeline tests below assert per-repo indexing, which needs a
-# deterministic single repo. The enumeration path gets its own config (AC 41).
+# deterministic single repo. The enumeration path gets its own config.
 _CONFIG = RepoConfig.model_validate(
     {"version": 1, "connections": [{"type": "github", "repos": ["acme/widgets"]}]}
 )
@@ -218,7 +218,7 @@ def test_token_never_appears_on_error_path(caplog: pytest.LogCaptureFixture) -> 
 
 @pytest.mark.unit
 def test_token_never_appears_during_enumeration(caplog: pytest.LogCaptureFixture) -> None:
-    """AC 41: enumeration is a new HTTP path, and it carries the same header.
+    """Enumeration is a new HTTP path, and it carries the same header.
 
     ``indexer.fetch`` logs ``X-RateLimit-Remaining`` per selector; a careless
     edit that logged the whole request/headers instead would leak the token.

@@ -1,5 +1,5 @@
-// Locates a semantic search chunk's position within a file's full content. FALLBACK path
-// (issue #36): chunks indexed since issue #44 carry an exact start_line/end_line and
+// Locates a semantic search chunk's position within a file's full content. FALLBACK path:
+// chunks indexed since line tracking was added carry an exact start_line/end_line and
 // ChunkCard links straight to #L<start>-L<end>; rows indexed before line tracking have
 // nulls, so ChunkCard picks a "needle" line from the chunk and FilePage re-finds that same
 // text in the file it loads -- an approximate but good-enough anchor.

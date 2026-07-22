@@ -1,4 +1,4 @@
-"""Route-level unit tests for the webui FastAPI backend (issue #35 WS-B).
+"""Route-level unit tests for the webui FastAPI backend.
 
 No DB, no SDK, no real Lakebase engine: ``get_engine``/``get_settings`` are FastAPI
 dependencies (``webui/main.py``), so tests override them (``app.dependency_overrides``) with a
@@ -479,7 +479,7 @@ def test_api_semantic_enabled_payload_passes_through_byte_identical(
 def test_api_semantic_new_filter_and_similarity_fields_pass_through_unmodified(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The route body is unchanged for these fields (WS-B, issue semantic-filter-similarity): it
+    # The route body is unchanged for these fields: it
     # never inspects similarity/query_parse_error/unsupported_filter/nothing_to_embed, it just
     # forwards whatever app.service returns. Three separate payload shapes, one per new
     # recoverable state plus the enabled+similarity shape, each asserted byte-identical.

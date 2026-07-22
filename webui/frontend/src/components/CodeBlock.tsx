@@ -75,7 +75,7 @@ export function CodeBlock({
   content: string;
   lang: string | null;
   targetLine: number | null;
-  /** Inclusive end of a highlighted range (issue #44 chunk anchors); null = single line. */
+  /** Inclusive end of a highlighted range (chunk anchors); null = single line. */
   targetEndLine?: number | null;
 }): JSX.Element {
   const theme = useTheme();

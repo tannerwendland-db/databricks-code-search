@@ -1,6 +1,6 @@
 # webui frontend
 
-Vite + React + TypeScript SPA for the code-search web UI (issue #35, WS-C). Talks to the
+Vite + React + TypeScript SPA for the code-search web UI. Talks to the
 FastAPI backend in `webui/main.py` via `/api/*`.
 
 ## Develop

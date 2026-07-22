@@ -1,4 +1,4 @@
-// State machine for the search page's paginated results. The wire contract (ralplan-35 WS-A/C):
+// State machine for the search page's paginated results. The wire contract:
 // the API always passes `cursor=` explicitly, so every envelope carries `next_cursor`
 // (string | null); a non-null cursor means more candidate rows remain and drives the
 // "Load more" button. Banners (`truncated`/`truncation_reason`, `query_too_broad`,
@@ -27,7 +27,7 @@ export interface SearchFile {
   matches: SearchMatch[];
   // Indexed commit for permalink_branch, sourced from repo_branches (never files.commit) --
   // present only when the search scope resolved to specific branch(es) (commit-scoped or
-  // explicit branch: queries); absent for unscoped searches (ralplan-commit-hash-search step 7).
+  // explicit branch: queries); absent for unscoped searches.
   commit?: string | null;
 }
 

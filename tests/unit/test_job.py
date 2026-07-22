@@ -9,7 +9,7 @@ recording ``index_fn`` — so no Databricks creds and no Postgres are needed.
 transport, so the fail-fast criteria exercise the actual wiring.
 
 ``normalize_repo``'s own tables live in ``tests/unit/test_repo_config.py`` after
-the Decision 0 move; they are not duplicated here.
+that move; they are not duplicated here.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ class _GitHub:
         # listed here answers with an empty branch list.
         self.branches = branches or {}
         # full_name entries here answer the /branches endpoint with a 500,
-        # exercising the complete-or-raise contract at the job level (#61 AC4).
+        # exercising the complete-or-raise contract at the job level.
         self.branches_fail = branches_fail or set()
         # Appended to from worker threads under fan-out; list.append is atomic,
         # so the contents are safe even though the ORDER is not deterministic.
@@ -431,7 +431,7 @@ def test_run_parses_files_and_symbols() -> None:
     assert idx.counts == [IndexCounts(files=2, symbols=1, swept=0)]
 
 
-# --- AC 33: import health (the Decision 0 circular-import regression guard) ---
+# --- import health (the circular-import regression guard) -------------------
 # Deliberately a SUBPROCESS check. This module has already imported indexer.job
 # by the time any test body runs, so an in-process `import indexer.job` would be
 # vacuous. Both directions are checked because a cycle fails in either order.
@@ -451,9 +451,9 @@ def test_modules_import_in_a_cold_interpreter(statement: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
-# --- AC 34 ------------------------------------------------------------------
+# --- config_loader defaults to load_config -----------------------------------
 # Asserted here rather than in test_repo_config.py so the import-light model
-# module's test file never imports indexer.job (Axis B1).
+# module's test file never imports indexer.job.
 
 
 @pytest.mark.unit
@@ -461,12 +461,12 @@ def test_run_config_loader_defaults_to_load_config() -> None:
     assert inspect.signature(run).parameters["config_loader"].default is load_config
 
 
-# --- AC 35 / 36 / 38 / 39 / 40: fail-fast before any indexing ---------------
+# --- fail-fast before any indexing -------------------------------------------
 
 
 @pytest.mark.unit
 def test_run_fails_fast_when_an_enumeration_fails() -> None:
-    """AC 35: the second org 404s -> nothing is indexed and no tarball is fetched."""
+    """The second org 404s -> nothing is indexed and no tarball is fetched."""
     idx = _RecordingIndex()
     github = _GitHub(enumerations={"acme": [_repo_meta("acme/widgets")]})  # "other" 404s
     code = _run(_config(orgs=["acme", "other"]), idx, github=github)
@@ -477,7 +477,7 @@ def test_run_fails_fast_when_an_enumeration_fails() -> None:
 
 @pytest.mark.unit
 def test_run_returns_1_when_config_resolves_to_zero_repos() -> None:
-    """AC 36: an org that enumerates only excluded repos resolves to nothing."""
+    """An org that enumerates only excluded repos resolves to nothing."""
     idx = _RecordingIndex()
     github = _GitHub(enumerations={"acme": [_repo_meta("acme/f", fork=True)]})
     code = _run(_config(orgs=["acme"]), idx, github=github)
@@ -488,11 +488,11 @@ def test_run_returns_1_when_config_resolves_to_zero_repos() -> None:
 
 @pytest.mark.unit
 def test_run_isolates_failing_repo() -> None:
-    """AC 37: both repos resolve; the second's resolve_ref 404s at INDEX time.
+    """Both repos resolve; the second's resolve_ref 404s at INDEX time.
 
     Per-repo isolation is a property of the indexing loop, so it can only be
     exercised by a failure that occurs *after* resolution succeeds. A malformed
-    entry now fails at resolution instead — see AC 38.
+    entry now fails at resolution instead -- see the test below.
     """
     idx = _RecordingIndex()
     github = _GitHub(missing={"acme/gadgets"})
@@ -503,7 +503,7 @@ def test_run_isolates_failing_repo() -> None:
 
 @pytest.mark.unit
 def test_malformed_explicit_repo_aborts_the_whole_run() -> None:
-    """AC 38: a documented semantic change.
+    """A documented semantic change.
 
     A bad explicit entry used to be isolated to its own repo, with the others
     still indexed. It now raises out of resolve_repos, so the run indexes
@@ -520,7 +520,7 @@ def test_malformed_explicit_repo_aborts_the_whole_run() -> None:
 
 @pytest.mark.unit
 def test_bare_value_error_from_resolution_returns_1(caplog: pytest.LogCaptureFixture) -> None:
-    """AC 40: normalize_repo's bare ValueError must not escape as a traceback.
+    """normalize_repo's bare ValueError must not escape as a traceback.
 
     The handler catches `Exception`, not a named tuple — a narrow catch would
     let this one through and break main()'s exit-code contract.
@@ -548,7 +548,7 @@ def test_bare_value_error_from_resolution_returns_1(caplog: pytest.LogCaptureFix
 def test_config_error_returns_1_without_opening_the_database(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """AC 39: a failed config read never reaches create_db_engine.
+    """A failed config read never reaches create_db_engine.
 
     ``engine=None`` is required: the injected-engine path never calls
     create_db_engine at all, which would make the assertion vacuous.
@@ -580,8 +580,8 @@ def test_config_error_returns_1_without_opening_the_database(
     assert idx.calls == []
 
 
-# --- semantic chunk_writer wiring (issue #14 Phase 2) -----------------------
-# Chunks are chunked+embedded OUTSIDE index_repo's transaction (A4): run()/
+# --- semantic chunk_writer wiring --------------------------------------------
+# Chunks are chunked+embedded OUTSIDE index_repo's transaction: run()/
 # _index_one() precompute a chunk_writer closure over already-embedded vectors
 # and hand it to index_fn, which (in production) is index_repo.
 
@@ -620,7 +620,7 @@ def test_semantic_enabled_builds_and_wires_a_chunk_writer() -> None:
     assert code == 0
     assert idx.chunk_writer is not None
     # main.py + README.md's chunk text is embedded in one up-front call, not
-    # lazily per file inside index_repo's transaction (A4).
+    # lazily per file inside index_repo's transaction.
     assert len(embed_calls) == 1
     assert len(embed_calls[0]) == 2
 
@@ -761,7 +761,7 @@ def test_unbuildable_embedder_does_not_abort_the_whole_run() -> None:
 def test_config_yaml_semantic_disabled_beats_env_enabled(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """AC 2: ``semantic.enabled: false`` in config.yaml wins over an env-enabled cfg.
+    """``semantic.enabled: false`` in config.yaml wins over an env-enabled cfg.
 
     The job has no reachable env surface, so config.yaml is authoritative. With the
     overlay applied before the embedder build, an injected embed_fn is never called
@@ -1203,7 +1203,7 @@ def test_one_branchs_failure_does_not_stop_the_repos_other_branches() -> None:
     assert sorted(seen) == ["feature", "main"]
 
 
-# --- #61: reconciliation-safe branch discovery (BranchResolution / RepoOutcome) ---
+# --- reconciliation-safe branch discovery (BranchResolution / RepoOutcome) ---
 
 
 @pytest.mark.unit
@@ -1255,7 +1255,7 @@ def test_index_one_inner_reports_discovery_incomplete_when_capped() -> None:
 
 @pytest.mark.unit
 def test_index_one_inner_default_flip_mirror_is_complete() -> None:
-    """AC3 mirrored at the job level: an unmatched retired branch does not affect completeness.
+    """Mirrors the branch-level test: an unmatched retired branch does not affect completeness.
 
     Distinct from the cap-overflow case above: here nothing was dropped by the cap
     -- "master" simply never matched the glob -- so completeness stays True.
@@ -1311,7 +1311,7 @@ def test_run_indexes_kept_branches_and_logs_reconciliation_blocked_warning(
 def test_branch_listing_failure_fails_the_repo_and_never_calls_index_fn(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """AC4: a branch-listing API failure must fail the WHOLE repo, never return a
+    """A branch-listing API failure must fail the WHOLE repo, never return a
     silently short branch list -- a truncated-but-unflagged list would be wrongly
     trusted as complete reconciliation evidence."""
     idx = _RecordingIndex()
@@ -1494,8 +1494,8 @@ def test_engine_is_disposed_only_after_every_worker_returned(
 def test_duration_is_logged_per_repo_and_for_the_whole_run(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """AC1b's instrument. Without these lines, "throughput is measured on the
-    first production run" is an unfalsifiable promise, so the numbers are
+    """A duration-logging instrument. Without these lines, "throughput is measured
+    on the first production run" is an unfalsifiable promise, so the numbers are
     asserted to be present and parseable — not merely assumed."""
     idx = _RecordingIndex()
     engine = _FakeEngine(
@@ -1817,7 +1817,7 @@ def test_starved_repo_fails_alone_and_downloads_nothing(
     assert "failed to index acme/gadgets" in caplog.text
 
 
-# --- Reconciliation checkpoint (#59) ----------------------------------------
+# --- Reconciliation checkpoint -----------------------------------------------
 
 
 def _repo_entry(name: str) -> RepoEntry:

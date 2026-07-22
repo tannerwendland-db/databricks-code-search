@@ -1,14 +1,13 @@
-"""Payload builders for the search corpus, shared by the MCP app and the web UI app (issue #35).
+"""Payload builders for the search corpus, shared by the MCP app and the web UI app.
 
-Extracted from ``app/main.py`` so a second Databricks App (``webui/``) can call the exact same
-search/file/repo-listing logic in-process without importing the MCP server module (which builds
-a ``FastMCP``/Starlette ASGI app as an import side effect). ``app/main.py`` keeps ``_``-prefixed
-aliases (``_search_code_payload = service.search_code_payload`` etc.) for its own call sites and
-existing tests, so this move is a pure relocation: wire shapes, signatures, and behavior are
-byte-identical to before.
+These live here rather than in ``app/main.py`` so a second Databricks App (``webui/``) can call
+the same search/file/repo-listing logic in-process without importing the MCP server module
+(which builds a ``FastMCP``/Starlette ASGI app as an import side effect). ``app/main.py`` keeps
+``_``-prefixed aliases (``_search_code_payload = service.search_code_payload`` etc.) for its own
+call sites and existing tests.
 
 Pure-ish builders (engine + config in, dict out) so unit tests pin the exact wire shape without
-the SDK. Each opens its own connection INSIDE the caller's thread (never shares one across
+the SDK. Each opens its own connection inside the caller's thread (never shares one across
 threads). Shapes are pinned to zoekt parity (``tests/unit/test_main.py``).
 """
 
@@ -48,18 +47,18 @@ from app.search.semantic import _semantic_search_payload as semantic_search_payl
 from app.search.symbols import SymbolResult, symbol_search
 
 # `semantic_search_payload` (above) is a public re-export: the webui-facing alias of the MCP
-# semantic_search tool's builder (issue #36), kept here so webui/main.py keeps importing every
-# payload builder from app.service only.
+# semantic_search tool's builder, kept here so webui/main.py imports every payload builder
+# from app.service only.
 
 # --------------------------------------------------------------------- pagination cursor
 
 
 class _Unset:
-    """Sentinel type for the ``cursor`` param of :func:`search_code_payload` (issue #35 A2).
+    """Sentinel type for the ``cursor`` param of :func:`search_code_payload`.
 
     Mirrors :class:`app.search.grep._Unset`: distinguishes "no ``cursor`` argument at all"
-    (every pre-#35 caller, incl. the MCP ``search_code`` tool -- gets today's exact envelope,
-    no ``next_cursor`` key) from "``cursor`` explicitly supplied" (pagination mode, active even
+    (callers that omit it, including the MCP ``search_code`` tool -- get the envelope with no
+    ``next_cursor`` key) from "``cursor`` explicitly supplied" (pagination mode, active even
     when the value is ``None`` for page 1, which the webui API always does).
     """
 
@@ -132,12 +131,12 @@ def decode_cursor(cursor: str) -> FileCursor:
 def _query_has_symbol_atom(node: Node) -> bool:
     """Structurally determine whether ``node`` carries a ``sym:`` atom, without a DB round trip.
 
-    Used on pagination continuation pages (issue #35 A2), where the symbol leg does not run
-    (folding is page-1-only -- see :func:`search_code_payload`): mirrors exactly what
+    Used on pagination continuation pages, where the symbol leg does not run (folding is
+    page-1-only -- see :func:`search_code_payload`): mirrors exactly what
     ``not sym_result.no_symbol_atom`` would report from a live :func:`symbol_search` run (it
     short-circuits on this identical structural check, ``symbols.py``'s ``if not patterns``),
-    so query-shape suppression (issue #31) stays consistent across every page WITHOUT reusing
-    the ``sym_result is None`` timeout sentinel -- that sentinel proves a different fact (a
+    so query-shape suppression stays consistent across every page without reusing the
+    ``sym_result is None`` timeout sentinel -- that sentinel proves a different fact (a
     timed-out DB hit), which is simply false when no DB hit was attempted at all.
     """
     match node:
@@ -211,7 +210,7 @@ def _has_content_atom(node: Node) -> bool:
     This is what distinguishes a ``commit:`` query's two moods: a bare ``commit:<hash>`` (no
     content atom) is a reverse-lookup that returns the resolution only, while ``commit:<hash>
     <terms>`` is a scoped search. ``file:``/``lang:``-only queries alongside a commit atom count
-    as bare (resolution only) in v1 -- they carry no content to highlight.
+    as bare (resolution only) -- they carry no content to highlight.
     """
     match node:
         case Substring() | Regex() | SymbolFilter():
@@ -227,7 +226,7 @@ def _has_content_atom(node: Node) -> bool:
 def _select_permalink_branch(
     branch_filters: frozenset[str], row_branches: tuple[str, ...]
 ) -> str | None:
-    """Pick the one branch a search-result row's permalink should resolve to (issue #46).
+    """Pick the one branch a search-result row's permalink should resolve to.
 
     Contract: ``None`` iff ``branch_filters`` is empty -- the query had no ``branch:`` filter
     anywhere -- and ``None`` is returned here and ONLY here (or if ``row_branches`` itself is
@@ -239,7 +238,7 @@ def _select_permalink_branch(
     content-sha row. An empty intersection with filters present is reachable only via an OR arm
     that matched this row on a non-branch predicate (e.g. ``branch:x OR lang:go``); that case
     returns ``min(row_branches)``, NEVER ``None`` -- falling back to ``None`` here would send the
-    caller to default-branch resolution, which is the very bug this issue fixes.
+    caller to default-branch resolution, which is the bug to avoid.
     """
     if not branch_filters:
         return None
@@ -251,12 +250,12 @@ def _select_permalink_branch(
 
 @dataclass(frozen=True)
 class ResolvedCommit:
-    """One (repo, branch) head that a ``commit:`` prefix resolves to (issue: git-hash search).
+    """One (repo, branch) head that a ``commit:`` prefix resolves to.
 
-    Sourced from ``repo_branches.last_indexed_commit`` -- the ONLY commit truth-source, never the
-    ambiguous ``files.commit`` (models.py:88). ``index_time`` aliases the ``last_indexed_at``
-    column exactly as :func:`list_repos_payload` does; :meth:`as_payload` is the wire shape
-    carried by the ``resolved`` envelope field and the UI banner.
+    Sourced from ``repo_branches.last_indexed_commit`` -- the only commit truth-source, never the
+    ambiguous ``files.commit``. ``index_time`` aliases the ``last_indexed_at`` column exactly as
+    :func:`list_repos_payload` does; :meth:`as_payload` is the wire shape carried by the
+    ``resolved`` envelope field and the UI banner.
     """
 
     repo: str
@@ -313,8 +312,8 @@ def _scope_branch(
 ) -> str | None:
     """Pick the one branch a result row's permalink/commit metadata resolves to.
 
-    An explicit ``branch:`` filter takes precedence (delegates to :func:`_select_permalink_branch`
-    exactly as before commit search existed). Otherwise, for a commit-scoped query, the row was
+    An explicit ``branch:`` filter takes precedence (delegates to
+    :func:`_select_permalink_branch`). Otherwise, for a commit-scoped query, the row was
     matched via the ``repo_branches`` subquery, so it resolves to the lexicographically smallest
     branch shared by this row and this repo's resolved commit heads. ``None`` for a query that is
     neither branch- nor commit-scoped -- the pre-existing default-branch behavior.
@@ -362,7 +361,7 @@ def _search_envelope(
     """Build the pinned ``search_code`` envelope (zoekt fields + additive signal fields).
 
     ``no_content_atom`` -- the query carried no content atom at all (e.g. ``lang:go``), so
-    there was nothing to highlight and zero files is a *shape* outcome, not a true negative.
+    there was nothing to highlight and zero files is a shape outcome, not a true negative.
     ``zero_width_only_atoms`` -- content atoms were present but every one provably matches
     zero-width (e.g. ``/^/``), so every span was dropped. Mutually exclusive by construction.
 
@@ -374,19 +373,20 @@ def _search_envelope(
         ``sym_result`` is non-None with ``no_symbol_atom=True``, so ``sym_result.symbols`` is
         empty, so ``files`` comes only from grep -- which is empty by grep's invariant. QED
 
-    Additive and permanent: agents may depend on these keys, so they can never be removed.
+    These keys are additive and permanent: agents may depend on them, so they can never be
+    removed.
 
-    ``next_cursor`` (issue #35 A2) is OMITTED from the envelope entirely when left at its
-    sentinel default -- the legacy/non-pagination shape every pre-#35 caller still gets, pinned
-    by ``tests/unit/test_main.py::test_envelope_keys_are_pinned_shape_plus_exactly_two``. Pass
-    an explicit ``str | None`` only when ``search_code_payload`` was itself called with a
+    ``next_cursor`` is omitted from the envelope entirely when left at its sentinel default --
+    the non-pagination shape, pinned by
+    ``tests/unit/test_main.py::test_envelope_keys_are_pinned_shape_plus_exactly_two``. Pass an
+    explicit ``str | None`` only when ``search_code_payload`` was itself called with a
     ``cursor`` kwarg (pagination mode).
 
-    ``resolved``/``commit_not_indexed`` (git-hash search) are likewise OMITTED unless the query
-    carried a ``commit:`` atom -- so a non-commit query's shape is byte-identical to before, and
-    a consumer never sees the keys on a query that has no commit scope. When present, ``resolved``
-    lists every (repo, branch, commit, index_time) the prefix(es) resolved to and
-    ``commit_not_indexed`` is True iff that list is empty (no indexed branch at that commit).
+    ``resolved``/``commit_not_indexed`` are likewise omitted unless the query carried a
+    ``commit:`` atom -- so a consumer never sees the keys on a query that has no commit scope.
+    When present, ``resolved`` lists every (repo, branch, commit, index_time) the prefix(es)
+    resolved to and ``commit_not_indexed`` is True iff that list is empty (no indexed branch at
+    that commit).
     """
     envelope: dict[str, Any] = {
         "query": query,
@@ -421,46 +421,44 @@ def search_code_payload(
     """Run grep + symbol search and shape the merged result to the zoekt parity envelope.
 
     Content matches (grep) and ``sym:`` definition matches (:func:`symbol_search`) are folded
-    into one ``files`` -> ``matches`` list grouped by ``(repo_id, path, content_sha)`` (0003:
-    a path may have more than one indexed content version, one per divergent branch group, so
-    the merge key includes ``content_sha`` to keep them as distinct file entries -- each
-    carrying its own real ``branches`` membership array instead of the old hardcoded
-    ``["HEAD"]``), matching zoekt's single-tool model where ``sym:`` results ride the normal
-    envelope. A symbol match carries
-    ``symbols: [{name, kind}]`` and ``line`` = the definition's first line (no highlight ``text``
-    in V1, so ``grep_search("sym:X")`` -- which returns nothing highlight-driven -- is answered
-    here). ``QueryParseError`` -> ``query_parse_error`` + empty files; ``QueryTooBroadError``
-    (either leg) -> ``query_too_broad`` + ``truncated``. ``repo_id`` is resolved to ``Repo.name``.
-    ``byte_ranges`` are our UTF-8 line-local half-open offsets (documented divergence from
+    into one ``files`` -> ``matches`` list grouped by ``(repo_id, path, content_sha)``. A path
+    may have more than one indexed content version, one per divergent branch group, so the
+    merge key includes ``content_sha`` to keep them as distinct file entries -- each carrying
+    its own ``branches`` membership array. This matches zoekt's single-tool model where
+    ``sym:`` results ride the normal envelope. A symbol match carries ``symbols: [{name,
+    kind}]`` and ``line`` = the definition's first line (no highlight ``text``, so
+    ``grep_search("sym:X")`` -- which returns nothing highlight-driven -- is answered here).
+    ``QueryParseError`` -> ``query_parse_error`` + empty files; ``QueryTooBroadError`` (either
+    leg) -> ``query_too_broad`` + ``truncated``. ``repo_id`` is resolved to ``Repo.name``.
+    ``byte_ranges`` are UTF-8 line-local half-open offsets (a documented divergence from
     zoekt's char ``start_col``/``end_col``).
 
-    **Query-shape suppression (issue #31).** grep's ``no_content_atom`` /
-    ``zero_width_only_atoms`` are per-leg facts; both are ANDed here with ``not sym_answers``
-    so neither fires on a query the symbol leg answered. ``sym:Handler`` is filter-only to grep
-    but fully answered here, and ``sym:Handler /^/`` is zero-width-only to grep yet returns
-    files -- flagging either would contradict the results sitting beside it and train agents to
-    ignore the signal.
+    Query-shape suppression. grep's ``no_content_atom`` / ``zero_width_only_atoms`` are per-leg
+    facts; both are ANDed here with ``not sym_answers`` so neither fires on a query the symbol
+    leg answered. ``sym:Handler`` is filter-only to grep but fully answered here, and
+    ``sym:Handler /^/`` is zero-width-only to grep yet returns files -- flagging either would
+    contradict the results sitting beside it and train agents to ignore the signal.
 
-    ``sym_answers`` treats an UNKNOWN symbol leg (``sym_result is None``, i.e. the leg timed
+    ``sym_answers`` treats an unknown symbol leg (``sym_result is None``, i.e. the leg timed
     out) as answering, which is a proof rather than a precaution: ``None`` arises only from
     ``QueryTooBroadError``, which means the DB was hit, which means the ``if not patterns``
-    short-circuit at ``symbols.py:173`` was False, which means the query HAD a ``sym:`` atom.
-    The inverted form (``sym_result is not None and ...``) would emit a false flag on exactly
-    that timed-out ``sym:`` query. Corollary: suppression can never swallow the filter-only
-    case this issue exists to signal -- a query like ``file:.md`` has no ``sym:`` atom, so it
-    short-circuits before any DB hit and can never reach ``sym_result is None``.
+    short-circuit in ``symbols.py`` was False, which means the query had a ``sym:`` atom. The
+    inverted form (``sym_result is not None and ...``) would emit a false flag on exactly that
+    timed-out ``sym:`` query. Corollary: suppression can never swallow the filter-only case it
+    exists to signal -- a query like ``file:.md`` has no ``sym:`` atom, so it short-circuits
+    before any DB hit and can never reach ``sym_result is None``.
 
-    **Pagination mode (issue #35 A2).** Omitting ``cursor`` entirely (its sentinel default)
-    reproduces every byte of the pre-#35 envelope -- no ``next_cursor`` key, and a row-capped
-    grep result still sets ``truncated=True``/``"row_cap"``. Supplying ``cursor`` at all --
-    INCLUDING ``None`` for page 1, which the webui API always does -- switches to pagination
-    mode: the envelope always carries a ``next_cursor`` (``str | null``), and a grep row-cap
-    fill sets ``truncated=False`` + a non-null ``next_cursor`` instead of an error banner (see
-    :func:`app.search.grep.grep_search`'s own mode gating, which this mirrors exactly). A
-    garbled/tampered/version-mismatched ``cursor`` string raises :class:`CursorError`
-    UNCAUGHT -- never silently restarts at page 1.
+    Pagination mode. Omitting ``cursor`` entirely (its sentinel default) yields the
+    non-pagination envelope -- no ``next_cursor`` key, and a row-capped grep result still sets
+    ``truncated=True``/``"row_cap"``. Supplying ``cursor`` at all -- including ``None`` for
+    page 1, which the webui API always does -- switches to pagination mode: the envelope always
+    carries a ``next_cursor`` (``str | null``), and a grep row-cap fill sets ``truncated=False``
+    + a non-null ``next_cursor`` instead of an error banner (mirroring
+    :func:`app.search.grep.grep_search`'s own mode gating). A garbled/tampered/version-
+    mismatched ``cursor`` string raises :class:`CursorError` uncaught -- never silently
+    restarts at page 1.
 
-    The symbol leg (``sym:`` definitions) folds in ONLY on page 1 (pagination mode with
+    The symbol leg (``sym:`` definitions) folds in only on page 1 (pagination mode with
     ``cursor=None``); continuation pages (``cursor`` is a real cursor) skip it entirely, so a
     multi-page ``sym:X foo`` result never repeats a symbol. See :func:`_query_has_symbol_atom`
     for how shape-flag suppression stays correct on those skipped pages.
@@ -470,9 +468,9 @@ def search_code_payload(
     if isinstance(cursor, str):
         decoded_cursor = decode_cursor(cursor)  # CursorError propagates uncaught -- see docstring
 
-    # Built as kwargs (rather than always passing `cursor=`) so the legacy/bare call omits the
-    # kwarg entirely -- grep_search's OWN sentinel default is what makes that byte-identical to
-    # a pre-#35 call, mirroring the gating one level up.
+    # Built as kwargs (rather than always passing `cursor=`) so a call that omits the cursor
+    # omits the kwarg entirely -- grep_search's own sentinel default then selects the
+    # non-pagination path, mirroring the gating one level up.
     grep_kwargs: dict[str, Any] = {
         "row_limit": limit,
         "max_content_bytes": cfg.max_content_bytes,
@@ -485,8 +483,8 @@ def search_code_payload(
         t0 = time.monotonic()
         # Parse up front (rather than letting grep_search be the first parse) so commit resolution
         # can gate leg execution: a bare or unresolvable `commit:` query must never fall through
-        # to an unfiltered / default-branch search. QueryParseError maps to the same field as
-        # before -- an invalid `commit:` hash (AC1) surfaces here.
+        # to an unfiltered / default-branch search. QueryParseError maps to query_parse_error --
+        # an invalid `commit:` hash surfaces here.
         try:
             node = parse(query)
         except QueryParseError as error:
@@ -509,10 +507,10 @@ def search_code_payload(
         branch_filters = _collect_branch_filters(node)
         commit_prefixes = _collect_commit_filters(node)
 
-        # Commit resolution runs BEFORE any leg. `resolved` stays None for a non-commit query, so
-        # its envelope keys are omitted and the shape is byte-identical to before; a commit query
-        # gets a list (possibly empty). Each distinct prefix resolves once; results are unioned so
-        # a prefix collision or same-commit-on-many-branches scopes to every (repo, branch) pair.
+        # Commit resolution runs before any leg. `resolved` stays None for a non-commit query, so
+        # its envelope keys are omitted; a commit query gets a list (possibly empty). Each
+        # distinct prefix resolves once; results are unioned so a prefix collision or
+        # same-commit-on-many-branches scopes to every (repo, branch) pair.
         resolved: list[ResolvedCommit] | None = None
         if commit_prefixes:
             resolved = []
@@ -521,8 +519,8 @@ def search_code_payload(
             has_content = _has_content_atom(node)
             if not resolved or not has_content:
                 # Two short-circuit moods, both returning the resolution + empty results:
-                #   * no resolution -> commit_not_indexed True; never an unfiltered search (AC5);
-                #   * bare lookup   -> resolution only (AC2), commit IS indexed.
+                #   * no resolution -> commit_not_indexed True; never an unfiltered search;
+                #   * bare lookup   -> resolution only, commit is indexed.
                 return _search_envelope(
                     query,
                     files=[],
@@ -574,8 +572,8 @@ def search_code_payload(
         # Note: a `sym:X foo` query runs the compiler candidate scan twice (once per leg), each
         # under its OWN statement_timeout -- so the DB-time bound is per-leg, not a single budget.
         #
-        # Page-1-only (issue #35 A2): a continuation page (pagination_mode with a real
-        # decoded_cursor) skips the symbol leg so folded symbols never repeat across pages.
+        # Page-1-only: a continuation page (pagination_mode with a real decoded_cursor) skips
+        # the symbol leg so folded symbols never repeat across pages.
         run_symbol_leg = not (pagination_mode and decoded_cursor is not None)
         query_too_broad = False
         sym_result: SymbolResult | None
@@ -611,9 +609,9 @@ def search_code_payload(
                 if repo_ids:
                     name_map = _repo_name_map(conn)
                 if branch_filters:
-                    # Commit metadata for explicit branch: queries (AC9): each named branch's
-                    # indexed head SHA, from repo_branches (never files.commit). Commit-scoped
-                    # queries need no lookup here -- `resolved` already carries their commits.
+                    # Commit metadata for explicit branch: queries: each named branch's indexed
+                    # head SHA, from repo_branches (never files.commit). Commit-scoped queries
+                    # need no lookup here -- `resolved` already carries their commits.
                     branch_commit_rows = list(
                         conn.execute(
                             select(Repo.name, RepoBranch.branch, RepoBranch.last_indexed_commit)
@@ -623,7 +621,7 @@ def search_code_payload(
                     )
 
     # Merge content + symbol matches into one file list grouped by (repo_id, path, content_sha)
-    # (0003: content_sha disambiguates divergent branch content versions of one path).
+    # -- content_sha disambiguates divergent branch content versions of one path.
     merged: dict[tuple[int, str, str], dict[str, Any]] = {}
 
     def _entry(
@@ -664,15 +662,15 @@ def search_code_payload(
             entry["matches"].append(
                 {
                     "line": sm.start_line,
-                    "text": "",  # V1: line + name + kind, no def-line text (documented follow-up)
+                    "text": "",  # line + name + kind only; no def-line text yet
                     "byte_ranges": [],
                     "symbols": [{"name": sm.name, "kind": sm.kind}],
                 }
             )
             match_count += 1  # each symbol definition is one match (its byte_ranges is empty)
 
-    # (repo name, branch) -> indexed head commit for result commit metadata (AC9). Commit-scoped
-    # rows come from `resolved` (already fetched); explicit branch: rows from branch_commit_rows.
+    # (repo name, branch) -> indexed head commit for result commit metadata. Commit-scoped rows
+    # come from `resolved` (already fetched); explicit branch: rows from branch_commit_rows.
     commit_map: dict[tuple[str, str], str | None] = {}
     if resolved:
         for rc in resolved:
@@ -685,22 +683,22 @@ def search_code_payload(
         # Order matches within a file by line; NULL symbol lines sort last.
         entry["matches"].sort(key=lambda m: (m["line"] is None, m["line"] or 0))
         # content_sha + permalink_branch are additive per-file keys on the payload shared by
-        # the MCP search_code tool and /api/search; per issue #46 the lexical MCP payload is
-        # additive-only (Option A, consensus-approved). permalink_branch is service-selected --
-        # clients must never infer a file version from the query.
+        # the MCP search_code tool and /api/search; the lexical MCP payload is additive-only.
+        # permalink_branch is service-selected -- clients must never infer a file version from
+        # the query.
         repo_name = name_map.get(entry["repo_id"], str(entry["repo_id"]))
         scope_branch = _scope_branch(branch_filters, resolved, repo_name, entry["branches"])
         file_entry: dict[str, Any] = {
             "repo": repo_name,
             "file": entry["path"],
             "language": entry["lang"],
-            "branches": list(entry["branches"]),  # real membership (0003), not hardcoded
+            "branches": list(entry["branches"]),  # real membership, not hardcoded
             "matches": entry["matches"],
             "content_sha": entry["content_sha"],
             "permalink_branch": scope_branch,
         }
-        # `commit` is additive and present ONLY when the scope resolves to a specific branch whose
-        # indexed head we know (AC9) -- so a non-scoped query's file shape is unchanged.
+        # `commit` is additive and present only when the scope resolves to a specific branch
+        # whose indexed head we know -- so a non-scoped query's file shape is unchanged.
         if scope_branch is not None:
             commit = commit_map.get((repo_name, scope_branch))
             if commit is not None:
@@ -733,8 +731,8 @@ def search_code_payload(
             # the filter matched (there is no content pattern to highlight), but grep's own
             # candidate scan can still hit `row_limit` and row-cap when the filter matches many
             # files -- e.g. a `sym:` name shared by >= row_limit files. Left alone, that still
-            # sets a non-null `next_cursor` (grep.py:482); the symbol leg only ever folds in on
-            # page 1 too (page-1-only, see above), so every continuation page would re-run the
+            # sets a non-null `next_cursor`; the symbol leg only ever folds in on page 1 too
+            # (page-1-only, see above), so every continuation page would re-run the
             # same filter-only grep scan, find nothing to highlight, and hand back ANOTHER
             # non-null cursor -- an unbounded sequence of empty pages. Suppressed here instead:
             # a filter-only query is always exactly one page, with any real "there's more"
@@ -766,14 +764,13 @@ def search_code_payload(
 def list_repos_payload(engine: Engine, cfg: Settings) -> dict[str, Any]:
     """List indexed repos with metadata, bounded by a transaction-local statement_timeout.
 
-    Branches are enumerated from ``repo_branches`` (0003) -- the authoritative per-branch
-    registry -- rather than guessed from the single ``repos.default_branch`` stamp, so a repo
-    indexed on multiple branches reports all of them. ``branches`` stays a flat name list, the
-    SAME shape as the old hardcoded single-element list, so a single-branch repo still renders
-    an array of one (additive-only: no existing key removed or reshaped). Per-branch detail
-    (``last_indexed_commit``/``index_time``) is carried in the new ``branch_details`` list; the
-    top-level ``index_time``/``last_indexed_commit`` mirror the repo's default-branch row
-    (falling back to the first enumerated branch if the default itself was never indexed).
+    Branches are enumerated from ``repo_branches`` -- the authoritative per-branch registry --
+    rather than guessed from the single ``repos.default_branch`` stamp, so a repo indexed on
+    multiple branches reports all of them. ``branches`` is a flat name list, so a single-branch
+    repo still renders an array of one. Per-branch detail (``last_indexed_commit``/
+    ``index_time``) is carried in ``branch_details``; the top-level ``index_time``/
+    ``last_indexed_commit`` mirror the repo's default-branch row (falling back to the first
+    enumerated branch if the default itself was never indexed).
     """
     with engine.connect() as conn:
         with conn.begin():
@@ -837,20 +834,19 @@ def get_file_payload(
 ) -> dict[str, Any]:
     """Fetch one file's full content by (repo name, path), scoped to one content version.
 
-    A path may now have more than one indexed content version (0003: one per divergent branch
-    group), so the predicate MUST resolve to <=1 row per ``(repo, path)``: an explicit
-    ``branch`` uses the GIN-served exact-membership operator ``branches @> ARRAY[:branch]``
-    (Option C1, the same as the query compiler's ``branch:`` lowering); omitted, it falls back
-    to the correlated ``coalesce(repos.default_branch, 'HEAD') = ANY(files.branches)`` --
-    byte-identical to the compiler's implicit default conjunct, the ``0003`` backfill, and the
-    semantic default leg. A branch name is a member of at most one content version of a given
-    path (a branch points at one tree), so both predicates keep the single-row guarantee
-    ``scalar_one_or_none()`` relies on -- a second row would raise ``MultipleResultsFound``,
-    signalling the guarantee broke rather than a bug here. Returns the RESOLVED ``branch``
-    (the given branch, or the repo's real default/`'HEAD'`) instead of the old hardcoded
-    ``"HEAD"``; a miss stays a structured ``found: False``. The resolved branch's indexed head
-    ``commit`` (AC9) is included from ``repo_branches`` (never ``files.commit``), ``None`` when
-    that branch was never registered.
+    A path may have more than one indexed content version (one per divergent branch group), so
+    the predicate must resolve to <=1 row per ``(repo, path)``: an explicit ``branch`` uses the
+    GIN-served exact-membership operator ``branches @> ARRAY[:branch]`` (the same as the query
+    compiler's ``branch:`` lowering); omitted, it falls back to the correlated
+    ``coalesce(repos.default_branch, 'HEAD') = ANY(files.branches)`` -- byte-identical to the
+    compiler's implicit default conjunct and the semantic default leg. A branch name is a member
+    of at most one content version of a given path (a branch points at one tree), so both
+    predicates keep the single-row guarantee ``scalar_one_or_none()`` relies on -- a second row
+    would raise ``MultipleResultsFound``, signalling the guarantee broke rather than a bug here.
+    Returns the resolved ``branch`` (the given branch, or the repo's default / ``'HEAD'``); a
+    miss stays a structured ``found: False``. The resolved branch's indexed head ``commit`` is
+    included from ``repo_branches`` (never ``files.commit``), ``None`` when that branch was
+    never registered.
     """
     with engine.connect() as conn:
         with conn.begin():

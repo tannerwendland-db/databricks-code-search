@@ -27,7 +27,7 @@ def _load_code_search_index_job() -> dict[str, Any]:
 
 @pytest.mark.unit
 def test_max_concurrent_runs_is_pinned_to_one() -> None:
-    """Global desired-state reconciliation (#56) needs at most one run writing the
+    """Global desired-state reconciliation needs at most one run writing the
     corpus at a time -- see indexer/job.py's module docstring and
     docs/runbooks/indexing-parallelism.md §1.1 for the full invariant."""
     job = _load_code_search_index_job()

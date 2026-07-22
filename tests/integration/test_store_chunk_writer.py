@@ -8,7 +8,7 @@ rather than ``semantic_metadata.create_all``: ``chunks.file_id`` references
 ``files.id`` across two separate ``MetaData`` instances (deliberately -- see
 app/db/semantic.py), which SQLAlchemy's cross-metadata FK sorter can't resolve.
 
-Proves the NEW issue #14 Phase 2 seam end-to-end: chunks written via a stub
+Proves the chunk_writer seam end-to-end: chunks written via a stub
 chunk_writer ride the same conn.begin() as the rest of that file's row, and
 cascade-delete when the file is swept (FK ON DELETE CASCADE), exactly like
 symbols.
@@ -79,7 +79,7 @@ _STUB_VECTOR = [0.1] * SEMANTIC_EMBEDDING_DIM
 
 def _stub_chunk_writer(conn: Connection, repo_id: int, file_id: int, pf: ParsedFile) -> None:
     # A fixed, precomputed 1-chunk-per-file "embedding" -- proves the seam without
-    # needing a real embedder (issue #14 A4: chunk_writer never calls one).
+    # needing a real embedder (chunk_writer never calls one).
     write_chunks(conn, file_id=file_id, chunks=[(0, pf.content, 1, 2, _STUB_VECTOR)])
 
 

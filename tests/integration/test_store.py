@@ -9,8 +9,8 @@ Multi-branch (0003+): ``index_repo`` now writes ONE ``(repo, branch)`` per call.
 Every existing single-branch scenario is exercised by calling it with
 ``branch="main", is_default=True`` -- the pre-multi-branch behavior, now
 expressed through the new signature. The new scenarios (shared/divergent
-content across branches, per-branch CAS, the empty-seen-set guard) are the
-Phase 2 acceptance criteria.
+content across branches, per-branch CAS, the empty-seen-set guard) cover
+multi-branch indexing end to end.
 """
 
 from __future__ import annotations
@@ -502,7 +502,7 @@ def test_empty_seen_set_does_not_touch_another_branchs_membership(conn: Connecti
 
 # --- Sweep under the actual least-privilege job role (not the superuser fixture) --
 # The membership sweep is pure DML with no TEMP TABLE specifically because the job
-# role has no guaranteed database-level TEMP privilege on Lakebase (plan Phase 2,
+# role has no guaranteed database-level TEMP privilege on Lakebase (see
 # app/db/grants.py). Running under the superuser fixture connection would let a
 # TEMP-table regression pass here and fail only in prod -- so this test actually
 # switches role via SET ROLE, the same technique test_migrations.py uses.

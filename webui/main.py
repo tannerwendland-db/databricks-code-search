@@ -1,4 +1,4 @@
-"""FastAPI web UI backend: a second Databricks App over the same corpus (issue #35).
+"""FastAPI web UI backend: a second Databricks App over the same corpus.
 
 Sibling to ``app/main.py`` (the MCP server): imports the SAME payload builders from
 ``app.service`` so search/file/repo-listing behavior is exactly the MCP tools' behavior,
@@ -155,7 +155,7 @@ async def api_search(
     cursor: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     """Search the indexed corpus. Always pagination mode: ``cursor`` is passed explicitly
-    (``None`` for page 1), so the response always carries ``next_cursor`` (issue #35 A2).
+    (``None`` for page 1), so the response always carries ``next_cursor``.
 
     Unlike :class:`app.service.CursorError` (raised uncaught -- see the ``except`` below),
     ``QueryParseError`` never escapes :func:`service.search_code_payload`: it is caught
@@ -224,7 +224,7 @@ async def api_semantic_status(cfg: SettingsDep) -> dict[str, Any]:
     Does NOT probe schema presence (``semantic_schema_missing`` surfaces at query time instead,
     inside the ``/api/semantic`` payload) -- the flag is a product decision (visibility), the
     schema is operator progress (an in-tab message), and conflating them would couple nav
-    rendering to DB health for no benefit (issue #36 Fork 4).
+    rendering to DB health for no benefit.
     """
     return {"semantic_enabled": cfg.semantic_enabled}
 
@@ -236,7 +236,7 @@ async def api_semantic(
     limit: Annotated[int, Query()] = 50,
     branch: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
-    """Hybrid semantic + BM25 search over indexed chunks (issue #36).
+    """Hybrid semantic + BM25 search over indexed chunks.
 
     ``q`` accepts the same in-query filter grammar as ``/api/search`` -- ``repo:``, ``file:``,
     ``lang:``, ``branch:`` atoms -- passed through verbatim to ``app.service`` (see

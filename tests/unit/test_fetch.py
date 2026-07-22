@@ -146,7 +146,7 @@ def test_extract_tarball_neutralizes_path_traversal(tmp_path: Path) -> None:
     assert not (dest.parent / "evil.txt").exists()
 
 
-# --- Enumeration (AC 14-21) -------------------------------------------------
+# --- Enumeration -------------------------------------------------------------
 
 
 def _repo_json(
@@ -170,7 +170,7 @@ def _recording_client(
 
 @pytest.mark.unit
 def test_list_org_repos_hits_org_endpoint_with_pagination_params() -> None:
-    """AC 14: /orgs/{org}/repos with parsed per_page=100 and page=1."""
+    """Hits /orgs/{org}/repos with parsed per_page=100 and page=1."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[_repo_json("acme/widgets")])
@@ -189,7 +189,7 @@ def test_list_org_repos_hits_org_endpoint_with_pagination_params() -> None:
 
 @pytest.mark.unit
 def test_list_user_repos_hits_user_endpoint_with_pagination_params() -> None:
-    """AC 15: /users/{user}/repos with the same parsed params."""
+    """Hits /users/{user}/repos with the same parsed params."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[_repo_json("u/thing")])
@@ -207,7 +207,7 @@ def test_list_user_repos_hits_user_endpoint_with_pagination_params() -> None:
 
 @pytest.mark.unit
 def test_list_repos_follows_link_rel_next() -> None:
-    """AC 16: 100 + Link rel=next, then 50 without -> 150 repos in 2 requests."""
+    """100 + Link rel=next, then 50 without -> 150 repos in 2 requests."""
     page1 = [_repo_json(f"acme/r{i}") for i in range(100)]
     page2 = [_repo_json(f"acme/r{i}") for i in range(100, 150)]
 
@@ -234,7 +234,7 @@ def test_list_repos_follows_link_rel_next() -> None:
 
 @pytest.mark.unit
 def test_list_repos_terminates_without_rel_next() -> None:
-    """AC 17: a Link header carrying only prev/last stops after one request."""
+    """A Link header carrying only prev/last stops after one request."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -256,7 +256,7 @@ def test_list_repos_terminates_without_rel_next() -> None:
 
 @pytest.mark.unit
 def test_list_repos_propagates_404() -> None:
-    """AC 18: a 404 stays an ordinary HTTPStatusError (raise_for_status convention)."""
+    """A 404 stays an ordinary HTTPStatusError (raise_for_status convention)."""
     client, _ = _recording_client(lambda request: httpx.Response(404))
     with client:
         with pytest.raises(httpx.HTTPStatusError):
@@ -265,7 +265,7 @@ def test_list_repos_propagates_404() -> None:
 
 @pytest.mark.unit
 def test_repo_meta_maps_github_fields() -> None:
-    """AC 19: full_name/fork/archived/size_kb map from full_name/fork/archived/size."""
+    """full_name/fork/archived/size_kb map from full_name/fork/archived/size."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -320,7 +320,7 @@ def test_list_branches_follows_link_rel_next() -> None:
 
 @pytest.mark.unit
 def test_list_branches_mid_pagination_http_failure_raises_no_partial_list() -> None:
-    """AC4/D5: complete-or-raise. Page 2 500s -> the whole call raises; page 1's
+    """Complete-or-raise: page 2 500s -> the whole call raises; page 1's
     branches are never returned as a silently-short list."""
     page1 = [{"name": f"b{i}"} for i in range(100)]
 
@@ -369,7 +369,7 @@ def test_list_branches_rate_limit_names_org_repo_selector() -> None:
 
 @pytest.mark.unit
 def test_rate_limit_429_raises_rate_limit_error() -> None:
-    """AC 20a: 429 is always a RateLimitError, naming the selector."""
+    """429 is always a RateLimitError, naming the selector."""
     client, _ = _recording_client(lambda request: httpx.Response(429))
     with client:
         with pytest.raises(RateLimitError, match="acme"):
@@ -378,7 +378,7 @@ def test_rate_limit_429_raises_rate_limit_error() -> None:
 
 @pytest.mark.unit
 def test_rate_limit_403_with_retry_after_raises_rate_limit_error() -> None:
-    """AC 20b: 403 + Retry-After -> RateLimitError quoting the derived wait."""
+    """403 + Retry-After -> RateLimitError quoting the derived wait."""
     client, _ = _recording_client(
         lambda request: httpx.Response(403, headers={"Retry-After": "60"})
     )
@@ -393,7 +393,7 @@ def test_rate_limit_403_with_retry_after_raises_rate_limit_error() -> None:
 
 @pytest.mark.unit
 def test_rate_limit_403_with_zero_remaining_quotes_reset_time() -> None:
-    """AC 20c: 403 + X-RateLimit-Remaining: 0 -> RateLimitError from X-RateLimit-Reset."""
+    """403 + X-RateLimit-Remaining: 0 -> RateLimitError from X-RateLimit-Reset."""
     client, _ = _recording_client(
         lambda request: httpx.Response(
             403,
@@ -411,7 +411,7 @@ def test_rate_limit_403_with_zero_remaining_quotes_reset_time() -> None:
 
 @pytest.mark.unit
 def test_bare_403_is_http_status_error_not_rate_limit() -> None:
-    """AC 20d: the org-scope permission failure must NOT be mislabeled as a quota failure."""
+    """The org-scope permission failure must NOT be mislabeled as a quota failure."""
     client, _ = _recording_client(
         lambda request: httpx.Response(403, headers={"X-RateLimit-Remaining": "4999"})
     )
@@ -422,7 +422,7 @@ def test_bare_403_is_http_status_error_not_rate_limit() -> None:
 
 @pytest.mark.unit
 def test_retry_after_takes_precedence_over_reset() -> None:
-    """AC 20: with both headers present, Retry-After wins."""
+    """With both headers present, Retry-After wins."""
     client, _ = _recording_client(
         lambda request: httpx.Response(
             403,
@@ -446,7 +446,7 @@ def test_retry_after_takes_precedence_over_reset() -> None:
 def test_rate_limit_remaining_logged_once_per_selector(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """AC 21: two selectors -> exactly two INFO records, each with its own remaining.
+    """Two selectors -> exactly two INFO records, each with its own remaining.
 
     The org selector deliberately spans TWO pages. With single-page selectors a
     per-page implementation would also emit exactly two records and pass; three
@@ -483,7 +483,7 @@ def test_rate_limit_remaining_logged_once_per_selector(
 def test_size_cap_error_names_overage_and_config_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC 43: the size-cap ValueError carries the byte-exact overage and exclude.size_mb."""
+    """The size-cap ValueError carries the byte-exact overage and exclude.size_mb."""
     monkeypatch.setattr(fetch, "MAX_TARBALL_BYTES", 4)
     with _client() as client:
         with pytest.raises(ValueError) as excinfo:

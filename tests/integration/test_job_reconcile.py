@@ -1,10 +1,9 @@
-"""Integration tests for indexer.job.run()'s clean-run reconciliation checkpoint (#59),
+"""Integration tests for indexer.job.run()'s clean-run reconciliation checkpoint,
 against a real local Postgres/Lakebase.
 
-Final phase of the corpus-reconciliation epic (#56): unlike test_reconcile.py (Phase
-1/2, storage primitives exercised directly), these drive the REAL run() end to end --
-REAL reconcile_retired_branches/reconcile_removed_repos, REAL index_repo, a real
-engine -- with only GitHub HTTP faked via httpx.MockTransport.
+Unlike test_reconcile.py (storage primitives exercised directly), these drive
+the REAL run() end to end -- REAL reconcile_retired_branches/reconcile_removed_repos,
+REAL index_repo, a real engine -- with only GitHub HTTP faked via httpx.MockTransport.
 
 Fixture note: run() opens its OWN connections (one per worker, one at the
 reconciliation checkpoint) rather than receiving a single held-open Connection, so
@@ -35,9 +34,9 @@ from indexer.repo_config import RepoConfig
 
 SCHEMA = "test_job_reconcile"
 
-# Every scenario here runs with semantic search off: reconciliation (#59) is a
-# core-corpus concern, chunks/embeddings are an orthogonal, already-covered layer
-# (issue #14), and disabling it means no embedder/SDK is ever touched here, and no
+# Every scenario here runs with semantic search off: reconciliation is a
+# core-corpus concern, chunks/embeddings are an orthogonal, already-covered layer,
+# and disabling it means no embedder/SDK is ever touched here, and no
 # ``chunks`` table (nor the Lakebase-only ``lakebase_vector`` extension its column
 # type needs -- absent on a plain local Postgres) has to exist at all.
 _CFG = Settings(semantic_enabled=False)

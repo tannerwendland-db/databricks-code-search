@@ -9,7 +9,7 @@
 # the auto-created objects and would force `replace_existing: true` on a data-bearing
 # production branch (drop-and-recreate = index loss on redeploy). Autoscaling CU and
 # suspend are pinned via the project's `default_endpoint_settings`; downstream resources
-# (#7 job, #11 app) reference the branch/endpoint by their well-known constant names.
+# (the job and both apps) reference the branch/endpoint by their well-known constant names.
 resources:
   postgres_projects:
     pg_project:

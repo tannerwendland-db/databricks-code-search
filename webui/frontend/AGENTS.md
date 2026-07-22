@@ -4,7 +4,7 @@
 # webui/frontend
 
 ## Purpose
-Vite + React 18 + TypeScript SPA for the code-search web UI (issue #35). Talks to the FastAPI backend (`webui/main.py`) exclusively via same-origin `/api/*` GETs; in production the backend serves the committed `dist/` build through `SPAStaticFiles` on the same origin, while `npm run dev` proxies `/api` to `http://127.0.0.1:8000` (see `vite.config.ts`). Dependencies are deliberately lean: `react`, `react-dom`, and `shiki` are the only runtime deps — routing and theming are hand-rolled with `useSyncExternalStore` instead of a router/state library.
+Vite + React 18 + TypeScript SPA for the code-search web UI. Talks to the FastAPI backend (`webui/main.py`) exclusively via same-origin `/api/*` GETs; in production the backend serves the committed `dist/` build through `SPAStaticFiles` on the same origin, while `npm run dev` proxies `/api` to `http://127.0.0.1:8000` (see `vite.config.ts`). Dependencies are deliberately lean: `react`, `react-dom`, and `shiki` are the only runtime deps — routing and theming are hand-rolled with `useSyncExternalStore` instead of a router/state library.
 
 ## Key Files
 | File | Description |

@@ -1,4 +1,4 @@
-"""Integration tests for the query compiler (issue #9): AST -> executed SQL rows.
+"""Integration tests for the query compiler: AST -> executed SQL rows.
 
 Runs against a Lakebase branch via ``create_db_engine()`` (schema idiom mirrors
 ``tests/integration/test_migrations.py``: a unique throwaway schema, ``SET
@@ -582,7 +582,7 @@ def _uses_index(plan: dict[str, Any], index_name: str) -> bool:
 @pytest.mark.integration
 @pytest.mark.xfail(
     strict=False,
-    reason="AC3 pre-0003: was the deterministic proving assertion (isolating the WHERE clause "
+    reason="Pre-0003, this was the deterministic proving assertion (isolating the WHERE clause "
     "left ix_files_content_trgm as the ONLY index able to satisfy the regex). 0003's implicit "
     "default-branch conjunct (see app/query/compiler.py::_default_branch_conjunct) means "
     "compile_query() can no longer produce that isolated WHERE clause at all -- every "
@@ -595,7 +595,7 @@ def _uses_index(plan: dict[str, Any], index_name: str) -> bool:
     "still-deterministic post-0003 GIN-usage proof (an explicit branch: predicate).",
 )
 def test_explain_trigram_extractable_regex_uses_gin_index(seeded: Seeded) -> None:
-    """AC3, the (pre-0003) deterministic proving assertion.
+    """The (pre-0003) deterministic proving assertion.
 
     ``/Handler.*Request/`` has >=1 literal 3-gram. Probing the predicate in isolation
     (``_explain_plan`` strips the ``ORDER BY``/``LIMIT``) with ``enable_seqscan = off``
@@ -612,7 +612,7 @@ def test_explain_trigram_extractable_regex_uses_gin_index(seeded: Seeded) -> Non
 
 @pytest.mark.integration
 def test_branch_filter_query_uses_branches_gin_index(seeded: Seeded) -> None:
-    """The post-0003 replacement for AC3's determinism guarantee.
+    """The post-0003 replacement for the prior determinism guarantee above.
 
     An explicit ``branch:`` predicate lowers to the GIN-served ``@>`` operator (Option C1) and
     opts OUT of the implicit default conjunct (see ``_has_branch_filter``), so this is the one

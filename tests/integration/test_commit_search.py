@@ -34,7 +34,7 @@ from indexer.hashing import content_sha
 SCHEMA_PREFIX = "test_commit_search"
 
 # Distinct full SHAs (lowercase hex). RELEASE_SHA/HOTFIX_SHA share a 7-char prefix so a prefix
-# query collides across two branches (multi-resolution / prefix-collision, AC4).
+# query collides across two branches (multi-resolution / prefix-collision).
 MAIN_SHA = "aaaaaa1000000000000000000000000000000000"
 RELEASE_SHA = "bbbbbb2000000000000000000000000000000000"
 HOTFIX_SHA = "bbbbbb2999999999999999999999999999999999"
@@ -139,7 +139,7 @@ def _files(payload: dict[str, Any]) -> list[str]:
 
 @pytest.mark.integration
 def test_bare_commit_resolves_non_default_branch(seeded: Seeded) -> None:
-    # AC2: bare commit:<prefix> returns the resolution + empty files, even for a NON-default
+    # A bare commit:<prefix> returns the resolution + empty files, even for a NON-default
     # branch (the default-branch conjunct must not swallow it).
     payload = service.search_code_payload(
         seeded.engine, seeded.cfg, f"commit:{RELEASE_SHA[:9]}", 200
@@ -154,7 +154,7 @@ def test_bare_commit_resolves_non_default_branch(seeded: Seeded) -> None:
 
 @pytest.mark.integration
 def test_bare_commit_no_match_flags_not_indexed(seeded: Seeded) -> None:
-    # AC5: a hash matching no indexed branch -> empty resolution + commit_not_indexed, never an
+    # A hash matching no indexed branch -> empty resolution + commit_not_indexed, never an
     # unfiltered search.
     payload = service.search_code_payload(seeded.engine, seeded.cfg, "commit:0000000", 200)
     assert payload["files"] == []
@@ -167,7 +167,7 @@ def test_bare_commit_no_match_flags_not_indexed(seeded: Seeded) -> None:
 
 @pytest.mark.integration
 def test_scoped_commit_equals_repo_branch_query_non_default(seeded: Seeded) -> None:
-    # AC3: commit:<prefix> foo == repo:^name$ branch:"release-2.1" foo, on a NON-default branch.
+    # commit:<prefix> foo == repo:^name$ branch:"release-2.1" foo, on a NON-default branch.
     commit_payload = service.search_code_payload(
         seeded.engine, seeded.cfg, f"commit:{RELEASE_SHA[:9]} foo", 200
     )
@@ -177,7 +177,7 @@ def test_scoped_commit_equals_repo_branch_query_non_default(seeded: Seeded) -> N
     assert _files(commit_payload) == _files(branch_payload) == ["src/on_release.go"]
     # scoping worked: the default-branch file is NOT in the commit-scoped result.
     assert "src/on_main.go" not in _files(commit_payload)
-    # per-file commit metadata (AC9) is the resolved head.
+    # per-file commit metadata is the resolved head.
     (entry,) = commit_payload["files"]
     assert entry["commit"] == RELEASE_SHA
     assert entry["permalink_branch"] == "release-2.1"
@@ -185,7 +185,7 @@ def test_scoped_commit_equals_repo_branch_query_non_default(seeded: Seeded) -> N
 
 @pytest.mark.integration
 def test_prefix_collision_unions_all_resolutions(seeded: Seeded) -> None:
-    # AC4: a prefix hitting two branches resolves to BOTH and scopes to the union of pairs;
+    # A prefix hitting two branches resolves to BOTH and scopes to the union of pairs;
     # equivalent to the OR-of-(repo,branch) form.
     commit_payload = service.search_code_payload(
         seeded.engine, seeded.cfg, f"commit:{SHARED_PREFIX} foo", 200

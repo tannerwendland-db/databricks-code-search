@@ -34,9 +34,9 @@ _BACKFILL_VERSION = 1
 
 def upgrade() -> None:
     op.add_column("repos", sa.Column("index_semantics_version", sa.Integer(), nullable=True))
-    # Backfill by CADENCE, not provenance: under pre-plan code every run
-    # re-indexed every repo unconditionally, so any row the last run touched was
-    # written by the code shipping today. The window deliberately EXCLUDES rows
+    # Backfill by CADENCE, not provenance: the code that predates this migration
+    # re-indexed every repo unconditionally on every run, so any row the last run
+    # touched was written by the code shipping today. The window deliberately EXCLUDES rows
     # the recent run did not rewrite -- a repo whose HEAD has not moved and whose
     # last index predates a parser change is stale in a way the SHA comparison
     # structurally cannot see. Those stay NULL and re-index once.

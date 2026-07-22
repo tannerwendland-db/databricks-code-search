@@ -1,4 +1,4 @@
-"""Standalone Core schema for the semantic-search surface (issue #14).
+"""Standalone Core schema for the semantic-search surface.
 
 ``chunks`` lives in its OWN ``MetaData()`` instance -- it is deliberately NOT added to
 ``app.db.models.Base.metadata``. The DDL is hand-written: ``chunks.embedding`` is a
@@ -44,9 +44,9 @@ chunks = Table(
     Column("file_id", Integer, ForeignKey("files.id", ondelete="CASCADE"), nullable=False),
     Column("chunk_index", Integer, nullable=False),
     Column("content", Text, nullable=False),
-    # 1-based inclusive line range of the chunk within its file (issue #44). Nullable:
-    # rows written before the line-aware writer stay NULL until naturally re-indexed,
-    # and readers must treat NULL as "no authoritative range".
+    # 1-based inclusive line range of the chunk within its file. Nullable: rows written
+    # before the line-aware writer stay NULL until naturally re-indexed, and readers must
+    # treat NULL as "no authoritative range".
     Column("start_line", Integer, nullable=True),
     Column("end_line", Integer, nullable=True),
     Column("embedding", Vector(SEMANTIC_EMBEDDING_DIM)),

@@ -1,11 +1,11 @@
-"""Unit tests for indexer.store's optional chunk_writer param (issue #14 Phase 2).
+"""Unit tests for indexer.store's optional chunk_writer param.
 
 A hand-rolled fake Connection stands in for Postgres so this stays a true unit
 test -- index_repo's core upsert/sweep/rollback behavior already has DB-backed
 coverage in tests/integration/test_store.py. This only proves the NEW surface:
-(a) chunk_writer defaults to None, which is byte-identical to the pre-Phase-2
-core path (AC-1), and (b) when given, it is called once per file, inside the
-same conn.begin(), with (repo_id, file_id, pf).
+(a) chunk_writer defaults to None, which is byte-identical to the core path
+before chunk writing was added, and (b) when given, it is called once per
+file, inside the same conn.begin(), with (repo_id, file_id, pf).
 """
 
 from __future__ import annotations

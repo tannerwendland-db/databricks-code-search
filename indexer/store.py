@@ -4,20 +4,17 @@ The caller supplies a live :class:`sqlalchemy.Connection` (mirroring the injecte
 connection seam in ``scripts/migrate.py``); ``index_repo`` owns the single atomic
 unit of work via ``with conn.begin():`` for ONE branch. A mid-run failure rolls
 the whole (repo, branch) transaction back, so the destructive sweep can never run
-against a partially-written index (plan Option A). The caller's ``search_path``
-is preserved -- this module never opens its own engine.
+against a partially-written index. The caller's ``search_path`` is preserved --
+this module never opens its own engine.
 
-Multi-branch (0003+): ``files`` is content-deduped on ``(repo_id, path,
-content_sha)``, with membership in a GIN-indexed ``branches`` array rather than
-one row per (repo, path). The caller is expected to index a repo's branches
-SEQUENTIALLY within one worker (plan Option A1: per-repo fan-out, branches
-serial) -- that is what makes the sweep's plain ``UPDATE``/``DELETE`` safe
-without an advisory lock: no other writer can touch this repo's rows
-concurrently. The per-``(repo, branch)`` CAS baseline now lives on
-``repo_branches``, not ``repos`` -- the old repos-level ``StaleIndexError`` guard
-is retired (see ``app/alembic/versions/0003_multi_branch.py``); only the
-default-branch run writes the deprecated ``repos`` legacy stamp, and it does so
-WITHOUT a CAS check (one release's grace period for 0002-era readers).
+``files`` is content-deduped on ``(repo_id, path, content_sha)``, with membership
+in a GIN-indexed ``branches`` array rather than one row per (repo, path). The
+caller is expected to index a repo's branches SEQUENTIALLY within one worker --
+that is what makes the sweep's plain ``UPDATE``/``DELETE`` safe without an
+advisory lock: no other writer can touch this repo's rows concurrently. The
+per-``(repo, branch)`` CAS baseline lives on ``repo_branches``, not ``repos``.
+Only the default-branch run writes the deprecated ``repos`` legacy stamp, and it
+does so WITHOUT a CAS check.
 """
 
 from __future__ import annotations
@@ -41,11 +38,11 @@ class StaleIndexError(RuntimeError):
 
     An invariant assertion, not an expected failure path: under the current
     single-run job model no second writer for one ``(repo, branch)`` can exist
-    (branches within a repo are indexed sequentially by the same worker -- plan
-    Option A1). It buys a loud failure the day that property is removed
-    (``for_each_task`` sharding, per-branch parallel fan-out, or a raised
-    ``max_concurrent_runs``). It protects the *stamp* only -- it does not detect
-    a refactor that moves the ``repo_branches`` upsert out of statement 2.
+    (branches within a repo are indexed sequentially by the same worker). It
+    buys a loud failure the day that property is removed (``for_each_task``
+    sharding, per-branch parallel fan-out, or a raised ``max_concurrent_runs``).
+    It protects the *stamp* only -- it does not detect a refactor that moves the
+    ``repo_branches`` upsert out of statement 2.
     """
 
 
@@ -67,8 +64,8 @@ class ReconcileCounts:
 
 
 # Called as chunk_writer(conn, repo_id, file_id, pf) once per file, inside the
-# same conn.begin() as the rest of that file's row (issue #14 Phase 2). Vectors
-# must already be computed -- this seam never calls an embedder itself (A4).
+# same conn.begin() as the rest of that file's row. Vectors must already be
+# computed -- this seam never calls an embedder itself.
 ChunkWriter = Callable[[Connection, int, int, ParsedFile], None]
 
 
@@ -118,10 +115,9 @@ def index_repo(
 
     ``items`` may be a lazy generator; it is consumed inside the open
     transaction so memory stays bounded. ``chunk_writer`` defaults to ``None``,
-    which makes this byte-identical to the core (semantic-off) path (issue #14
-    AC-1); when given, it must write PRECOMPUTED chunks -- embeddings are
-    computed outside this transaction (issue #14 A4), so no network call ever
-    happens here.
+    which makes this byte-identical to the core (semantic-off) path; when given,
+    it must write PRECOMPUTED chunks -- embeddings are computed outside this
+    transaction, so no network call ever happens here.
     """
     file_count = 0
     symbol_count = 0
@@ -258,17 +254,14 @@ def _sweep_membership(
     (the job role has no guaranteed database-level TEMP privilege on Lakebase,
     see ``app/db/grants.py``). Expressed as raw SQL rather than SQLAlchemy Core:
     the anti-join against a two-column ``unnest(...)`` table-valued function has
-    no materially clearer Core-expression form, and the exact shape here is what
-    the plan's design and its review-hardened pre-mortem (#5, the empty-seen-set
-    guard below) were validated against.
+    no materially clearer Core-expression form.
 
     **Empty seen-set guard**: if this branch parsed zero indexable files,
     skipping this sweep (WARN, return 0) is the conservative choice -- running
     it would strip ``branch`` from every row in the repo, wiping a branch's
     entire membership on a transient empty parse. A genuinely emptied branch
-    simply retains stale membership until it next indexes non-empty (the same
-    stale-not-wrong tradeoff as the retired-branch-reconciliation gap tracked in
-    ``.omc/plans/open-questions.md``).
+    simply retains stale membership until it next indexes non-empty (stale, but
+    not wrong).
     """
     if not seen_paths:
         logger.warning(
@@ -348,14 +341,13 @@ def reconcile_retired_branches(
 ) -> ReconcileCounts:
     """Remove retired branch membership from one repo's ``files`` and ``repo_branches``.
 
-    Phase 1 of the corpus-reconciliation epic (#56): a pure storage primitive
-    for branches that are no longer actively indexed (deleted, default-branch
-    changed, or narrowed out of a ``branches:`` glob) -- the case
-    ``_sweep_membership`` cannot reach, since that sweep only runs during an
-    active ``index_repo`` call for the branch being re-indexed. This helper
-    does not decide which branches are retired; the caller supplies a set
-    already proven retired (see #59), and it does not protect the live default
-    branch from being passed in by mistake.
+    A pure storage primitive for branches that are no longer actively indexed
+    (deleted, default-branch changed, or narrowed out of a ``branches:`` glob)
+    -- the case ``_sweep_membership`` cannot reach, since that sweep only runs
+    during an active ``index_repo`` call for the branch being re-indexed. This
+    helper does not decide which branches are retired; the caller supplies a set
+    already proven retired, and it does not protect the live default branch from
+    being passed in by mistake.
 
     **Sanitize first**: ``retired_branches`` is filtered to non-empty strings
     and de-duplicated before anything else. A ``None`` or blank entry bound
@@ -448,13 +440,13 @@ def reconcile_retired_branches(
 def reconcile_removed_repos(conn: Connection, *, desired_repos: Collection[str]) -> list[str]:
     """Purge every ``repos`` row whose name is absent from ``desired_repos``.
 
-    Phase 2 of the corpus-reconciliation epic (#56): the counterpart to
-    ``reconcile_retired_branches`` at the repo level -- a repo dropped entirely
-    from the resolved corpus config (renamed, deleted upstream, or narrowed out
-    of the config) is never revisited by any per-branch ``index_repo`` call, so
-    nothing else in this module ever removes its row. This helper does not
-    decide which repos are desired; the caller supplies the full resolved set
-    (see #59), and it does not infer membership from anything already stored.
+    The counterpart to ``reconcile_retired_branches`` at the repo level -- a
+    repo dropped entirely from the resolved corpus config (renamed, deleted
+    upstream, or narrowed out of the config) is never revisited by any
+    per-branch ``index_repo`` call, so nothing else in this module ever removes
+    its row. This helper does not decide which repos are desired; the caller
+    supplies the full resolved set, and it does not infer membership from
+    anything already stored.
 
     **Guard is a deliberate INVERSION of ``reconcile_retired_branches``'s
     sanitizer.** There, ``retired_branches`` is the branches to *remove*, so
@@ -498,8 +490,8 @@ def reconcile_removed_repos(conn: Connection, *, desired_repos: Collection[str])
     ``INDEX_SEMANTICS_VERSION`` bump (this is not an indexing run); no
     ``FOR UPDATE``/advisory lock -- the victim rows are disjoint from whatever
     ``index_repo``/``reconcile_retired_branches`` may be locking concurrently,
-    and #60 already serializes indexer runs so this and a live indexing run
-    never overlap in practice.
+    and the ``max_concurrent_runs: 1`` job pin already serializes indexer runs
+    so this and a live indexing run never overlap in practice.
 
     A ``NULL`` element could never reach this DML: unlike
     ``reconcile_retired_branches``'s ``<> ALL`` poison risk (where an

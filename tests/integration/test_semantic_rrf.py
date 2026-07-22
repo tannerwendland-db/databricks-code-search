@@ -1,4 +1,4 @@
-"""Integration tests for the hybrid RRF query against a real Lakebase branch (issue #14).
+"""Integration tests for the hybrid RRF query against a real Lakebase branch.
 
 Runs the PRODUCTION operators -- ``lakebase_ann`` ``<=>`` and ``lakebase_bm25``
 ``<@>`` / ``to_bm25query`` -- so this suite proves the fusion plumbing (both legs' ranks
@@ -187,7 +187,7 @@ def test_rrf_fuses_ann_and_bm25_legs(seeded: Connection) -> None:
     assert rows[0].repo == "acme/widgets"
     assert rows[0].path == "src/auth.py"
     assert rows[0].chunk_index == 0
-    # Line ranges round-trip from the writer to the envelope (issue #44).
+    # Line ranges round-trip from the writer to the envelope.
     assert (rows[0].start_line, rows[0].end_line) == (1, 1)
 
 
@@ -215,7 +215,7 @@ def test_ann_leg_uses_ann_index_not_seqscan_sort(seeded: Connection) -> None:
 def test_rrf_default_query_excludes_feature_only_chunk(seeded: Connection) -> None:
     # A second file, present ONLY on "feature" (not the repo's default "main"), with a chunk
     # aligned to its own distinctive query vector/term. The default (branch=None) query must
-    # never surface it -- D1's inner-subquery join+filter, proven end to end.
+    # never surface it -- the inner-subquery join+filter, proven end to end.
     repo_id = seeded.execute(select(Repo.id).where(Repo.name == "acme/widgets")).scalar_one()
     feature_file_id = seeded.execute(
         insert(File)
@@ -249,8 +249,8 @@ def _seed_null_default_head_chunk(conn: Connection) -> None:
 
     Shared by the two NULL-default tests below. Mirrors the compiler's
     ``test_null_default_branch_resolves_to_head`` and the MCP ``get_file`` gamma/nullbranch
-    case (plan test-plan item (b): the ``coalesce(...,'HEAD')`` reachability proof must hold
-    at all three default-branch sites -- compiler, semantic, ``get_file``).
+    case: the ``coalesce(...,'HEAD')`` reachability proof must hold
+    at all three default-branch sites -- compiler, semantic, ``get_file``.
     """
     null_repo_id = conn.execute(
         insert(Repo).values(name="gamma/nullbranch", default_branch=None).returning(Repo.id)
@@ -300,7 +300,7 @@ def test_rrf_explicit_branch_head_reaches_null_default_repo_chunk(seeded: Connec
     _seed_null_default_head_chunk(seeded)
 
     params = _null_default_params()
-    # Decision C1 (filter-semantics): the `branch` kwarg is unified with in-query `branch:`
+    # Filter-semantics: the `branch` kwarg is unified with in-query `branch:`
     # atoms into the single sem_branch_{i} bind mechanism -- params["branch"] no longer exists.
     params.update(filter_params(branch="HEAD"))
     branch_rows = seeded.execute(build_hybrid_rrf_sql(branch="HEAD"), params).all()
@@ -333,7 +333,7 @@ def test_rrf_branch_filter_reaches_feature_only_chunk(seeded: Connection) -> Non
     params = _params(topk=5, limit=10)
     params["qvec"] = format_vector_literal(_vec({2: 1.0}))
     params["qtext"] = "gizmo"
-    # Decision C1 (filter-semantics): merges filter_params(...)'s sem_branch_0 bind instead of
+    # Filter-semantics: merges filter_params(...)'s sem_branch_0 bind instead of
     # setting params["branch"] directly (the unified branch bind mechanism).
     params.update(filter_params(branch="feature"))
 
@@ -398,7 +398,7 @@ def test_lang_filter_scopes_ranking_to_named_language(seeded: Connection) -> Non
 
 @pytest.mark.integration
 def test_filters_scope_before_ranking_not_after(seeded: Connection) -> None:
-    """Filter-then-rank proof (AC8): with topk small enough that the out-of-scope chunk would
+    """Filter-then-rank proof: with topk small enough that the out-of-scope chunk would
     monopolize an unscoped leg's candidate pool, a repo:-scoped query still surfaces the
     in-scope chunk -- proving candidates are drawn from the FILTERED subset, never ranked over
     the whole corpus first and filtered after (which would leave the ANN leg with zero rows
@@ -476,7 +476,7 @@ def test_ann_leg_with_filter_still_uses_ann_index(seeded: Connection) -> None:
 def test_cosine_distance_reflects_alignment_and_bm25_only_rows_are_non_null(
     seeded: Connection,
 ) -> None:
-    """Similarity plausibility (AC8, Decision B1): the perfectly-aligned chunk's cosine
+    """Similarity plausibility: the perfectly-aligned chunk's cosine
     distance is smaller (higher similarity) than the partially-aligned one's, and the
     BM25-only chunk -- never in the ANN leg's topk=2 candidate pool -- still gets a non-null
     cosine_distance from the outer-select recompute.

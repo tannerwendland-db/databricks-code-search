@@ -8,14 +8,15 @@ caller (``indexer.job``) skips the GitHub branches API call entirely in that
 common case.
 
 :func:`resolve_branches` returns a :class:`BranchResolution`, not a bare list --
-its ``complete`` flag is what lets corpus reconciliation (#56) trust a resolved
-branch set as deletion evidence. A branch set truncated by the soft cap
+its ``complete`` flag is what lets corpus reconciliation trust a resolved branch
+set as deletion evidence. A branch set truncated by the soft cap
 (``complete=False``) must never be treated as the FULL set a repo resolves to:
 reconciliation logic that deletes ``repo_branches`` rows or ``files`` membership
 for anything "no longer resolved" would otherwise retire branches that were only
 dropped by the cap, not genuinely removed upstream. Nothing in THIS module
 performs that deletion -- it only makes the completeness of its own output an
-unignorable, typed property so the caller (and #59's clean-run gate) can.
+unignorable, typed property so the caller (and the clean-run reconciliation gate)
+can.
 """
 
 from __future__ import annotations
