@@ -867,6 +867,18 @@ def _index_one_inner(
     org, repo = name.split("/", 1)
     default_branch, default_head_sha = resolve_ref(http_client, org, repo)
 
+    # An override matched to THIS repo by resolve_repos wins outright over the global
+    # cap -- it is not a floor/ceiling blend, since a repo big enough to need one
+    # override is usually big enough that the global default would just fail it again.
+    max_chunks_per_repo = entry.semantic_max_chunks or cfg.semantic_max_chunks_per_repo
+    if entry.semantic_max_chunks is not None:
+        logger.info(
+            "semantic chunk cap override for %s: %d (global %d)",
+            name,
+            entry.semantic_max_chunks,
+            cfg.semantic_max_chunks_per_repo,
+        )
+
     # The common case -- no branches: configured -- needs no GitHub branches API
     # call at all: resolve_branches ignores all_branches entirely when globs is
     # empty (it always resolves to just [default_branch]).
@@ -890,6 +902,7 @@ def _index_one_inner(
             embed_fn=embed_fn,
             stamps=stamps,
             started=started,
+            max_chunks_per_repo=max_chunks_per_repo,
         )
         for branch in resolution.branches
     ]
@@ -918,6 +931,7 @@ def _index_one_branch(
     embed_fn: EmbedFn | None,
     stamps: dict[tuple[str, str], tuple[str | None, int | None]],
     started: float,
+    max_chunks_per_repo: int,
 ) -> BranchOutcome:
     """Fetch, parse, and store ONE branch. Never raises -- every failure is classified.
 
@@ -925,6 +939,12 @@ def _index_one_branch(
     never indexed before) degrades to "index it", safe in the correct direction.
     A stored ``None`` version means the provenance of the stored index is
     unknown, so the branch is always re-indexed.
+
+    ``max_chunks_per_repo`` is the caller's (``_index_one_inner``'s) already-resolved
+    effective cap -- this repo's ``semantic_max_chunks_per_repo`` override if one
+    matched, else ``cfg.semantic_max_chunks_per_repo``. Taken as a parameter rather
+    than read from ``cfg`` directly so every branch of a repo enforces the SAME
+    resolved cap without recomputing (or risking drift on) the override lookup.
     """
     try:
         head_sha = (
@@ -961,9 +981,7 @@ def _index_one_branch(
                 # index_repo's open transaction (A4).
                 files = list(iter_source_files(root))
                 try:
-                    chunk_writer = _precompute_chunk_writer(
-                        files, embed_fn, cfg.semantic_max_chunks_per_repo
-                    )
+                    chunk_writer = _precompute_chunk_writer(files, embed_fn, max_chunks_per_repo)
                 except Exception:
                     # The semantic layer is ADDITIVE: a chunk-ceiling breach, a downed embedder,
                     # or a dim/count mismatch must not cost this branch its core index. Letting

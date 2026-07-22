@@ -48,3 +48,23 @@ connections:
     #     - "acme/*-deprecated"
     #     - "acme/test-*"
     #   size_mb: 500      # GitHub reports size in KB; this is MB. Default: no cap.
+
+# Per-repo override of the semantic chunk-embedding ceiling (default 8000, env
+# CODE_SEARCH_SEMANTIC_MAX_CHUNKS_PER_REPO — see app/config.py). A repo whose
+# real chunk count exceeds the GLOBAL cap degrades to indexing its core corpus
+# WITHOUT chunks (semantic is additive, never fails the branch); list it here to
+# raise (or lower) its own cap instead of moving the default for every repo.
+# Keys are canonicalised the same way as `repos:` above (URL/SSH/bare all work,
+# matched case-insensitively); an override naming a repo the corpus never
+# resolves logs a WARNING (typo guard) and is otherwise a no-op.
+#
+# Mind the memory math before raising one: buffered vectors are ~32 KB/chunk
+# (dim=1024, Python float-list storage), so 8000 ≈ 260 MB resident for the
+# duration of that repo's write. With semantic on, at most 2 workers run
+# concurrently (indexer/repo_config.py's effective_workers clamp), so a large
+# override multiplies straight into the job container's peak memory — e.g. two
+# repos overridden to 20000 concurrently is ≈1 GB just in vectors, on top of
+# the base per-worker cost. A repo that legitimately needs far more than that
+# needs the temp-table staging path (follow-up), not a bigger override.
+# semantic_max_chunks_per_repo:
+#   "acme/huge-monorepo": 20000

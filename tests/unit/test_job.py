@@ -178,11 +178,18 @@ def _repo_meta(full_name: str, **overrides: Any) -> dict[str, Any]:
     return {"full_name": full_name, "fork": False, "archived": False, "size": 10, **overrides}
 
 
-def _config(*, index_concurrency: int | None = None, **connection: Any) -> RepoConfig:
+def _config(
+    *,
+    index_concurrency: int | None = None,
+    semantic_max_chunks_per_repo: dict[str, int] | None = None,
+    **connection: Any,
+) -> RepoConfig:
     """A single-github-connection RepoConfig from selector kwargs."""
     doc: dict[str, Any] = {"version": 1, "connections": [{"type": "github", **connection}]}
     if index_concurrency is not None:
         doc["index_concurrency"] = index_concurrency
+    if semantic_max_chunks_per_repo is not None:
+        doc["semantic_max_chunks_per_repo"] = semantic_max_chunks_per_repo
     return RepoConfig.model_validate(doc)
 
 
@@ -651,6 +658,60 @@ def test_semantic_ceiling_exceeded_degrades_but_still_indexes_the_core() -> None
     # Proves the core index got the real work, not an empty items generator: "not skipped"
     # and "correctly indexed" are different claims, and only the latter is the contract.
     assert idx.counts[0] == IndexCounts(files=2, symbols=1, swept=0)
+
+
+@pytest.mark.unit
+def test_semantic_cap_override_lets_a_repo_exceed_the_global_cap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A repo named in ``semantic_max_chunks_per_repo`` gets ITS cap, not the global one.
+
+    Same fixture repo as the ceiling test above (main.py + README.md -> 2 chunks
+    total), but here the global cap (1) would fail it while the per-repo override
+    (5) does not -- proving the override, not just the global default, is what
+    reaches ``_precompute_chunk_writer``.
+    """
+    idx = _RecordingIndex()
+    cfg = Settings(semantic_enabled=True, semantic_max_chunks_per_repo=1)
+    config = _config(repos=["acme/widgets"], semantic_max_chunks_per_repo={"acme/widgets": 5})
+    with caplog.at_level(logging.INFO, logger="indexer.job"):
+        code = _run(config, idx, cfg=cfg, embed_fn=lambda texts: [[0.0] for _ in texts])
+    assert code == 0
+    assert idx.calls == ["acme/widgets"]
+    assert idx.chunk_writer is not None  # the override, not the global cap of 1, applied
+    messages = [r.getMessage() for r in caplog.records if r.name == "indexer.job"]
+    assert "semantic chunk cap override for acme/widgets: 5 (global 1)" in messages
+
+
+@pytest.mark.unit
+def test_semantic_cap_override_exceeded_still_degrades_to_core_index() -> None:
+    """Blowing through an OVERRIDE cap keeps the additive-degrade contract.
+
+    The override changes the number, never the failure mode: a repo over its
+    per-repo cap must still get its core index (files/symbols/sweep) with only
+    the chunks skipped, exactly like the global-cap test above.
+    """
+    idx = _RecordingIndex()
+    # Global cap of 5 would pass the 2-chunk fixture; the override of 1 fails it.
+    cfg = Settings(semantic_enabled=True, semantic_max_chunks_per_repo=5)
+    config = _config(repos=["acme/widgets"], semantic_max_chunks_per_repo={"acme/widgets": 1})
+    code = _run(config, idx, cfg=cfg, embed_fn=lambda texts: [[0.0] for _ in texts])
+    assert code == 0  # a semantic-only breach never fails the repo
+    assert idx.calls == ["acme/widgets"]
+    assert idx.chunk_writer is None  # the override (1), not the global cap (5), fired
+    assert idx.counts[0] == IndexCounts(files=2, symbols=1, swept=0)
+
+
+@pytest.mark.unit
+def test_semantic_cap_without_a_matching_override_still_enforces_the_global_cap() -> None:
+    """An override for a DIFFERENT repo must not leak into this repo's effective cap."""
+    idx = _RecordingIndex()
+    cfg = Settings(semantic_enabled=True, semantic_max_chunks_per_repo=1)
+    config = _config(repos=["acme/widgets"], semantic_max_chunks_per_repo={"acme/other": 5})
+    code = _run(config, idx, cfg=cfg, embed_fn=lambda texts: [[0.0] for _ in texts])
+    assert code == 0
+    assert idx.calls == ["acme/widgets"]
+    assert idx.chunk_writer is None  # no override matched -- the global cap of 1 still fires
 
 
 @pytest.mark.unit

@@ -239,6 +239,79 @@ def test_effective_workers(configured: int, semantic_enabled: bool, expected: in
     assert effective_workers(cfg, semantic_enabled=semantic_enabled) == expected
 
 
+# --- semantic_max_chunks_per_repo (per-repo chunk-cap override) ------------
+
+
+@pytest.mark.unit
+def test_semantic_max_chunks_per_repo_defaults_to_empty() -> None:
+    """Omitting the field is the supported shape -- every config predating this
+    override is unaffected: no repo gets one."""
+    assert parse_config(_MINIMAL, source="cfg").semantic_max_chunks_per_repo == {}
+
+
+@pytest.mark.unit
+def test_semantic_max_chunks_per_repo_canonicalises_keys() -> None:
+    """A URL-spelled key must land under the same ``org/repo`` resolve_repos uses,
+    or the override would silently never match at indexing time."""
+    raw = (
+        b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"
+        b"semantic_max_chunks_per_repo:\n"
+        b'  "https://github.com/acme/huge-monorepo.git": 20000\n'
+    )
+    cfg = parse_config(raw, source="cfg")
+    assert cfg.semantic_max_chunks_per_repo == {"acme/huge-monorepo": 20000}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", [0, -1])
+def test_semantic_max_chunks_per_repo_rejects_non_positive_values(value: int) -> None:
+    raw = (
+        b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"
+        b"semantic_max_chunks_per_repo:\n  acme/widgets: %d\n" % value
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(raw, source="cfg")
+    assert "semantic_max_chunks_per_repo" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_semantic_max_chunks_per_repo_rejects_non_int_value() -> None:
+    raw = (
+        b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"
+        b"semantic_max_chunks_per_repo:\n  acme/widgets: not-a-number\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(raw, source="cfg")
+    assert "semantic_max_chunks_per_repo" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_semantic_max_chunks_per_repo_rejects_unparseable_repo_key() -> None:
+    raw = (
+        b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"
+        b"semantic_max_chunks_per_repo:\n"
+        b'  "https://gitlab.com/acme/widgets": 20000\n'
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(raw, source="cfg")
+    assert "unsupported host" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_semantic_max_chunks_per_repo_rejects_duplicate_keys_post_casefold() -> None:
+    """``Acme/Widgets`` and ``acme/widgets`` are the same GitHub repo -- YAML itself
+    treats them as distinct mapping keys, so the collision must be caught here."""
+    raw = (
+        b"version: 1\nconnections:\n  - type: github\n    users: [u]\n"
+        b"semantic_max_chunks_per_repo:\n"
+        b"  Acme/Widgets: 10000\n"
+        b"  acme/widgets: 20000\n"
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        parse_config(raw, source="cfg")
+    assert "duplicate" in str(excinfo.value)
+
+
 # --- parse failures (AC 7-8) ------------------------------------------------
 
 
