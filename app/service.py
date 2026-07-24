@@ -26,6 +26,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.config import Settings
 from app.db.models import File, Repo, RepoBranch
+from app.query.compiler import DEFAULT_ROW_LIMIT
 from app.query.parser import (
     And,
     BranchFilter,
@@ -44,6 +45,7 @@ from app.query.parser import (
 )
 from app.search.errors import QueryTooBroadError
 from app.search.grep import FileCursor, grep_search
+from app.search.references import EdgeSite, ReferenceResult, resolve_references
 from app.search.semantic import _semantic_search_payload as semantic_search_payload  # noqa: F401
 from app.search.symbols import SymbolResult, symbol_search
 
@@ -907,4 +909,292 @@ def get_file_payload(
         "content": content,
         "found": found,
         "commit": commit,
+    }
+
+
+# ------------------------------------------------------------------- reference resolution
+
+
+def _site_payload(site: EdgeSite, name_map: dict[int, str]) -> dict[str, Any]:
+    """Shape one resolved :class:`~app.search.references.EdgeSite` for the wire.
+
+    ``symbol_id`` is deliberately absent from each candidate dict (D1/D4): it is a query-time
+    ranking tiebreak, never persisted, never a caller-facing identifier.
+    """
+    enclosing_symbol = (
+        {"name": site.enclosing_name, "kind": site.enclosing_kind}
+        if site.enclosing_name is not None
+        else None
+    )
+    return {
+        "repo": name_map.get(site.repo_id, str(site.repo_id)),
+        "file": site.path,
+        "line": site.line,
+        "edge_kind": site.edge_kind,
+        "target_name": site.target_name,
+        "enclosing_symbol": enclosing_symbol,
+        "resolution": site.resolution,
+        "candidate_count": site.candidate_count,
+        "candidates_truncated": site.candidates_truncated,
+        "candidates": [
+            {
+                "repo": name_map.get(candidate.repo_id, str(candidate.repo_id)),
+                "file": candidate.path,
+                "line": candidate.start_line,
+                "name": candidate.name,
+                "kind": candidate.kind,
+                "same_repo": candidate.same_repo,
+                "same_file": candidate.same_file,
+                "kind_match": candidate.kind_match,
+            }
+            for candidate in site.candidates
+        ],
+    }
+
+
+def _reference_result_to_payload(
+    result: ReferenceResult, name_map: dict[int, str]
+) -> dict[str, Any]:
+    """Shared envelope shape for :func:`find_references_payload` / :func:`list_imports_payload`:
+    ``sites`` + ``site_count`` + a ``resolution_summary`` histogram + truncation flags."""
+    resolution_summary = {"unique": 0, "ambiguous": 0, "unresolved": 0}
+    for site in result.sites:
+        resolution_summary[site.resolution] += 1
+    return {
+        "sites": [_site_payload(site, name_map) for site in result.sites],
+        "site_count": len(result.sites),
+        "resolution_summary": resolution_summary,
+        "truncated": result.truncated,
+        "truncation_reason": result.truncation_reason,
+    }
+
+
+def _reference_repo_name_map(conn: Any, result: ReferenceResult, cfg: Settings) -> dict[int, str]:
+    """Resolve every repo id across a :class:`ReferenceResult`'s sites AND candidates to names.
+
+    Run in a SEPARATE ``conn.begin()`` + ``SET LOCAL statement_timeout`` AFTER
+    :func:`resolve_references` returns -- its own ``set_config`` committed with its
+    transaction, so this lookup would otherwise run uncapped (mirrors ``search_code_payload``'s
+    post-leg ``_repo_name_map`` call).
+    """
+    repo_ids = {site.repo_id for site in result.sites}
+    repo_ids |= {candidate.repo_id for site in result.sites for candidate in site.candidates}
+    if not repo_ids:
+        return {}
+    with conn.begin():
+        conn.exec_driver_sql(f"SET LOCAL statement_timeout = {int(cfg.statement_timeout_ms)}")
+        return _repo_name_map(conn)
+
+
+def find_references_payload(
+    engine: Engine, cfg: Settings, name: str, limit: int, branch: str | None = None
+) -> dict[str, Any]:
+    """Resolve ``name``'s call sites to ranked candidate-set definitions.
+
+    Corpus-wide (no ``repo`` scope) over ``edge_kind="call"`` edges. Ambiguity is never
+    collapsed: an ``"ambiguous"`` site's ``candidates`` list carries every ranked candidate up
+    to the per-name cap (AC1). ``limit`` is the caller's already-clamped row limit (mirrors
+    :func:`search_code_payload` -- clamping is the caller's responsibility, e.g. the future
+    MCP tool registration in #87).
+    """
+    with engine.connect() as conn:
+        try:
+            result = resolve_references(
+                conn,
+                target_name=name,
+                edge_kind="call",
+                branch=branch,
+                row_limit=limit,
+                statement_timeout_ms=cfg.statement_timeout_ms,
+            )
+        except QueryTooBroadError:
+            return {
+                "query": name,
+                "kind": "references",
+                "symbol": name,
+                "branch": branch,
+                "sites": [],
+                "site_count": 0,
+                "resolution_summary": {"unique": 0, "ambiguous": 0, "unresolved": 0},
+                "truncated": True,
+                "truncation_reason": None,
+                "query_too_broad": True,
+            }
+        name_map = _reference_repo_name_map(conn, result, cfg)
+
+    return {
+        "query": name,
+        "kind": "references",
+        "symbol": name,
+        "branch": branch,
+        "query_too_broad": False,
+        **_reference_result_to_payload(result, name_map),
+    }
+
+
+_LIST_IMPORTS_DIRECTIONS = ("imports", "imported_by")
+
+# Deterministic ``query`` echo for the three PRE-DB validation-error payloads (Critic note 3):
+# the dedicated ``direction``/``repo``/``target`` fields already carry the caller's actual
+# inputs, so ``query`` is pinned to the empty string for EVERY validation error -- one
+# deterministic value across all three, independent of which argument was missing/invalid.
+_LIST_IMPORTS_VALIDATION_QUERY = ""
+
+
+def _list_imports_error_payload(
+    *,
+    direction: str,
+    repo: str | None,
+    target: str | None,
+    branch: str | None,
+    error_key: str,
+    error_value: Any,
+    reason: str,
+) -> dict[str, Any]:
+    """One deterministic PRE-DB validation-error shape for :func:`list_imports_payload`.
+
+    Mirrors ``app.search.semantic``'s ``unsupported_filter`` precedent: the full empty envelope
+    (``sites``/``site_count``/``resolution_summary``/``truncated``/``truncation_reason``/
+    ``query_too_broad``) plus the uniform ``kind``/``direction``/``repo``/``repo_known``/
+    ``target``/``branch`` keys, plus the single structured error flag (``unsupported_direction``
+    / ``missing_repo`` / ``missing_target``) and its remedy ``reason``. ``repo_known`` is
+    ``True``: a validation error is never a repo-existence miss (no DB lookup happened).
+    """
+    return {
+        "query": _LIST_IMPORTS_VALIDATION_QUERY,
+        "kind": "imports",
+        "direction": direction,
+        "repo": repo,
+        "repo_known": True,
+        "target": target,
+        "branch": branch,
+        "query_too_broad": False,
+        "sites": [],
+        "site_count": 0,
+        "resolution_summary": {"unique": 0, "ambiguous": 0, "unresolved": 0},
+        "truncated": False,
+        "truncation_reason": None,
+        error_key: error_value,
+        "reason": reason,
+    }
+
+
+def list_imports_payload(
+    engine: Engine,
+    cfg: Settings,
+    repo: str | None = None,
+    limit: int = DEFAULT_ROW_LIMIT,
+    branch: str | None = None,
+    *,
+    target: str | None = None,
+    direction: str = "imports",
+) -> dict[str, Any]:
+    """Enumerate ``import`` edge sites in one of two directions over ``edge_kind="import"``.
+
+    Both directions collapse to the SAME resolver call
+    (``resolve_references(edge_kind="import", repo=?, target_name=?)``); ``direction`` only
+    decides which argument is REQUIRED:
+
+    * ``direction="imports"`` (default): **``repo`` is REQUIRED** -- a corpus-wide listing
+      would filter on ``edge_kind`` alone, the trailing column of
+      ``ix_reference_edges_repo_kind (repo_id, edge_kind)``, which is not index-served. Lists
+      the repo's import sites; an optional ``target`` narrows to sites importing that exact
+      dotted path (index-served by ``ix_reference_edges_target_name`` either way).
+    * ``direction="imported_by"``: **``target`` is REQUIRED** -- "who imports X", corpus-wide
+      over ``ix_reference_edges_target_name`` (index-served, NOT the seq-scan case #86 D8
+      rejects). An optional ``repo`` narrows to importers within that one repo.
+
+    Deterministic PRE-DB validation returns a structured payload, NEVER an exception (mirroring
+    ``app.search.semantic``'s ``unsupported_filter``): an unknown ``direction`` sets
+    ``unsupported_direction`` (echoing the value); ``imports`` with no ``repo`` sets
+    ``missing_repo``; ``imported_by`` with no ``target`` sets ``missing_target``. Each carries
+    a remedy ``reason`` and the full empty envelope, and is proven to touch no DB.
+
+    ``repo_known=False`` is a structured "no such repo" miss (mirrors ``get_file_payload``'s
+    ``found: False``) -- distinct from a known repo with zero import sites (``repo_known=True``,
+    empty ``sites``); it is always ``True`` when no ``repo`` scope was requested. Import edges
+    are largely EXTERNAL by design (#86 D3: exact dotted-path match only, no last-segment
+    split), so most sites are expected to resolve ``"unresolved"`` -- not itself an error.
+
+    Uniform key set across both directions: ``query`` (the ``repo`` for ``imports``, the
+    ``target`` for ``imported_by``), ``kind:"imports"``, ``direction``, ``repo``, ``repo_known``,
+    ``target``, ``branch``, ``query_too_broad``, plus the shared reference envelope. All keys
+    are additive and permanent. Validation lives HERE (the service layer) so the #88 web UI
+    inherits it; the MCP tool is a pure wrapper. ``limit`` is the caller's already-clamped row
+    limit (mirrors :func:`find_references_payload`).
+    """
+    if direction not in _LIST_IMPORTS_DIRECTIONS:
+        return _list_imports_error_payload(
+            direction=direction,
+            repo=repo,
+            target=target,
+            branch=branch,
+            error_key="unsupported_direction",
+            error_value=direction,
+            reason="direction must be one of 'imports' or 'imported_by'",
+        )
+    if direction == "imports" and repo is None:
+        return _list_imports_error_payload(
+            direction=direction,
+            repo=repo,
+            target=target,
+            branch=branch,
+            error_key="missing_repo",
+            error_value=True,
+            reason="direction='imports' requires a repo to enumerate; pass repo=",
+        )
+    if direction == "imported_by" and target is None:
+        return _list_imports_error_payload(
+            direction=direction,
+            repo=repo,
+            target=target,
+            branch=branch,
+            error_key="missing_target",
+            error_value=True,
+            reason="direction='imported_by' requires a target dotted path; pass target=",
+        )
+
+    # `query` echoes the direction-primary argument: the repo enumerated (imports) or the
+    # target searched for (imported_by).
+    query = repo if direction == "imports" else target
+
+    with engine.connect() as conn:
+        try:
+            result = resolve_references(
+                conn,
+                target_name=target,
+                edge_kind="import",
+                repo=repo,
+                branch=branch,
+                row_limit=limit,
+                statement_timeout_ms=cfg.statement_timeout_ms,
+            )
+        except QueryTooBroadError:
+            return {
+                "query": query,
+                "kind": "imports",
+                "direction": direction,
+                "repo": repo,
+                "repo_known": True,
+                "target": target,
+                "branch": branch,
+                "sites": [],
+                "site_count": 0,
+                "resolution_summary": {"unique": 0, "ambiguous": 0, "unresolved": 0},
+                "truncated": True,
+                "truncation_reason": None,
+                "query_too_broad": True,
+            }
+        name_map = _reference_repo_name_map(conn, result, cfg)
+
+    return {
+        "query": query,
+        "kind": "imports",
+        "direction": direction,
+        "repo": repo,
+        "repo_known": result.repo_known,
+        "target": target,
+        "branch": branch,
+        "query_too_broad": False,
+        **_reference_result_to_payload(result, name_map),
     }

@@ -248,6 +248,8 @@ stall the server. `statement_timeout` bounds the database, not the rescan.
 | `semantic_search` | `query`, `limit=50`, `branch=None` | ranked chunks with `rrf_score` |
 | `list_repos` | — | indexed repos with per-branch last-indexed metadata |
 | `get_file` | `repo`, `path`, `branch=None` | full file content, or `found: false` |
+| `find_references` | `symbol`, `limit=200`, `branch=None` | ranked candidate reference (call) sites with enclosing symbols |
+| `list_imports` | `repo=None`, `target=None`, `direction=imports`, `branch=None`, `limit=200` | import edge sites; `repo` required for `imports`, `target` required for `imported_by` |
 
 Every tool returns a JSON string. `limit` is clamped server-side: a non-positive value
 falls back to 200, and anything above 1000 is capped there.
@@ -279,6 +281,23 @@ the embedder. The target Lakebase project's managed preload including
 `lakebase_vector,lakebase_text` is a stated project assumption — see
 [`docs/runbooks/semantic-enablement.md`](docs/runbooks/semantic-enablement.md).
 
+`find_references` and `list_imports` serve the knowledge-graph reference edges. They are
+**candidate-set, not compiler-precise** (grep-not-LSP): a call site is name-resolved to the
+`symbols` definitions its callee name could plausibly mean, ranked (`same_repo`/`same_file`/
+`kind_match`) but never collapsed to a single binding — `resolution` is `unique` (1
+candidate), `ambiguous` (2+), or `unresolved` (0), and the true pre-cap `candidate_count`
+survives capping. `list_imports` has two directions: `imports` enumerates a repo's import
+sites (`repo` required) and `imported_by` finds who imports a given dotted `target`
+corpus-wide (`target` required); invalid input comes back as a structured payload
+(`unsupported_direction`/`missing_repo`/`missing_target` with a `reason`), never an error, and
+import edges keep the full dotted path (so most read `unresolved` = external, by design).
+
+**"What tests cover symbol X"** needs no dedicated tool: call `find_references(X)` and
+client-side filter `sites` by your test-path convention (e.g. `file` starting with `tests/`);
+each surviving site's `enclosing_symbol` names the covering test. Two follow-ups are
+deliberately **deferred** past #87: repo/kind-scoped `find_references` filters, and per-file
+forward imports ("what does file F import").
+
 Two HTTP routes sit alongside the MCP mount: `GET /health` is liveness and never touches
 the database, and `GET /ready` runs `SELECT 1 FROM repos LIMIT 1` so that a role holding
 connect-but-not-select fails as 503 instead of shipping green.
@@ -299,6 +318,19 @@ open the app URL in a browser. See
 [`docs/runbooks/webui.md`](docs/runbooks/webui.md) for the app URL lookup, the grants detail,
 rebuilding the frontend (`make webui-build`), and the wheel-packaging mechanism that lets
 webui import `app.*` without duplicating it.
+
+The **Graph** tab exposes the same knowledge-graph reference edges as the MCP
+`find_references`/`list_imports` tools, via `GET /api/references` and `GET /api/imports` —
+thin passthroughs over the SAME `app/service.py` builders the MCP tools wrap (no duplicated
+graph logic; see [`docs/runbooks/webui.md`](docs/runbooks/webui.md) for the parity contract),
+presented as ranked candidate sets rather than raw rows. The edge model behind both surfaces:
+raw `call`/`import` edges are recorded at index time without resolving them, and each query
+resolves a name against `symbols` on the fly (query-time candidate-set resolution, not a
+build-time link step) — because this is grep-not-LSP name matching, a name can't always be
+collapsed to one binding, so results come back as ranked candidate sets (`unique`/`ambiguous`/
+`unresolved`) instead of a single "go to definition" answer. See
+[`docs/runbooks/reference-edges.md`](docs/runbooks/reference-edges.md) for the edge schema and
+resolver details.
 
 ## Deploy
 
@@ -596,6 +628,9 @@ Run the server locally with `make run` (binds `DATABRICKS_APP_PORT`, else 8000).
   semantic search (default-on): the preload assumption, opt-out, embeddings, memory notes
 - [`docs/runbooks/indexing-parallelism.md`](docs/runbooks/indexing-parallelism.md) —
   parallel indexing: worker sizing, skip-if-unchanged, compare-and-set stamping
+- [`docs/runbooks/reference-edges.md`](docs/runbooks/reference-edges.md) — the raw
+  call/import edge schema (`reference_edges`, migration `0005`): what it stores, the
+  no-symbol-FK design, and the grant-coupling this migration introduces
 - [`docs/runbooks/ci-lakebase.md`](docs/runbooks/ci-lakebase.md) — the integration CI
   gate: ephemeral Lakebase branches, prerequisites
 - [`docs/runbooks/webui.md`](docs/runbooks/webui.md) — the web UI app: auth, grants,

@@ -1,7 +1,7 @@
 """SQLAlchemy 2.0 models for the durable code search core.
 
-Covers ``repos`` / ``files`` / ``symbols`` / ``repo_branches``. No ``chunks`` /
-``VECTOR`` / ``tsvector`` (a separate version table). ``Base.metadata`` is
+Covers ``repos`` / ``files`` / ``symbols`` / ``repo_branches`` / ``reference_edges``.
+No ``chunks`` / ``VECTOR`` / ``tsvector`` (a separate version table). ``Base.metadata`` is
 the authoritative desired-state: it also declares the pg_trgm and
 ``files.branches`` GIN indexes so Alembic autogenerate emits them and there is
 no future drift. The 0001 migration owns the single ``CREATE EXTENSION IF NOT
@@ -13,16 +13,33 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-INDEX_SEMANTICS_VERSION = 2
+INDEX_SEMANTICS_VERSION = 4
 """Version of the indexing semantics the current code produces.
 
 2: semantic search default-on -- every already-indexed branch must re-index once so
 ``chunks`` backfills (the skip seam compares ``(head_sha, INDEX_SEMANTICS_VERSION)``,
 and without a bump a repo already at HEAD would skip forever and never get chunks).
+
+3: reference edges -- every already-indexed branch must re-index once so
+``reference_edges`` backfills; without a bump a branch at HEAD would skip forever
+and never get edges.
+
+4: reference edges for JS/TS/TSX/Go/Java/Rust -- every already-indexed branch
+must re-index once so multi-language ``reference_edges`` backfill; without a
+bump a branch at HEAD would skip forever and never get non-Python edges.
 
 Bump this whenever the *meaning* of what gets written changes: any change to
 ``indexer/symbols.py``, to ``indexer/parse.py``'s chunking, or to
@@ -98,6 +115,9 @@ class File(Base):
     symbols: Mapped[list[Symbol]] = relationship(
         back_populates="file", cascade="all, delete-orphan"
     )
+    reference_edges: Mapped[list[ReferenceEdge]] = relationship(
+        back_populates="file", cascade="all, delete-orphan"
+    )
 
 
 class Symbol(Base):
@@ -120,6 +140,45 @@ class Symbol(Base):
     end_line: Mapped[int | None] = mapped_column(Integer)
 
     file: Mapped[File] = relationship(back_populates="symbols")
+
+
+class ReferenceEdge(Base):
+    """Raw (unresolved) call/import edge for one file content-version.
+
+    Deliberately NO FK to symbols: symbol ids churn on every per-file
+    delete-and-reinsert, and an FK would couple the two rewrite orders inside
+    the indexing transaction for no query benefit (epic #82 rule: resolution
+    happens at query time by name-join). Enclosing symbol is denormalized.
+    NULL enclosing_* means module/top-level scope. Branch scoping rides
+    files.branches at query time, exactly as symbols does -- no branch column.
+    """
+
+    __tablename__ = "reference_edges"
+    __table_args__ = (
+        CheckConstraint("edge_kind IN ('call', 'import')", name="ck_reference_edges_edge_kind"),
+        Index("ix_reference_edges_target_name", "target_name"),
+        Index(
+            "ix_reference_edges_target_trgm",
+            "target_name",
+            postgresql_using="gin",
+            postgresql_ops={"target_name": "gin_trgm_ops"},
+        ),
+        Index("ix_reference_edges_file_id", "file_id"),
+        Index("ix_reference_edges_repo_kind", "repo_id", "edge_kind"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id", ondelete="CASCADE"))
+    file_id: Mapped[int] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"))
+    edge_kind: Mapped[str] = mapped_column(Text)
+    target_name: Mapped[str] = mapped_column(Text)
+    line: Mapped[int] = mapped_column(Integer)
+    enclosing_name: Mapped[str | None] = mapped_column(Text)
+    enclosing_kind: Mapped[str | None] = mapped_column(Text)
+    enclosing_start_line: Mapped[int | None] = mapped_column(Integer)
+    enclosing_end_line: Mapped[int | None] = mapped_column(Integer)
+
+    file: Mapped[File] = relationship(back_populates="reference_edges")
 
 
 class RepoBranch(Base):
